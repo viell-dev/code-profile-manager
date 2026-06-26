@@ -58,7 +58,7 @@ Each links to the authoritative explanation in PLAN.md.
   profile-local file for an inherited one. [PLAN.md §1.4](./PLAN.md).
 - **Extensions = shared install + per-profile membership** — adds are tiered (pool →
   vendored copy → editor CLI); removals edit only the membership list; never delete shared
-  folders; refuse removing from Default (its list *is* the shared pool). VSIX-source
+  folders; refuse removing from Default (its list _is_ the shared pool). VSIX-source
   extensions are vendored. [PLAN.md §1.2 and §4](./PLAN.md).
 - **Shared pool collision** — Code - OSS and VSCodium share `~/.vscode-oss/extensions`; one
   extensions dir ≠ one editor (matters for `gc`). [PLAN.md §1.2](./PLAN.md).
@@ -75,3 +75,5 @@ Each links to the authoritative explanation in PLAN.md.
   user-visible content/commits.
 - Project paths contain spaces — quote them; never `cd` to CWD; never backslash-escape.
 - AI files (`AGENTS.md`, `CLAUDE.md`) are globally git-ignored; force-add to commit them.
+- Always rebase and fast-forward, don't create merge commits. Also use pull --rebase. This includes
+  GitHub PRs. KEEP THE HISTORY LINEAR!
