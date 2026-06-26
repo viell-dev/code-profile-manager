@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/viell-dev/code-profile-manager/main/schema/config.schema.json",
+  "title": "Code Profile Manager editor config",
+  "description": "Declarative desired state for one VS Code OSS-based editor's profiles. Layers [global] settings/extensions, reusable [groups.*], the built-in [default] profile, and named [profiles.*] into an effective state per profile. See docs/config.md for the full reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "editor": {
+      "$ref": "#/$defs/editorRef",
+      "description": "How this config refers to / overrides the target editor."
+    },
+    "global": {
+      "$ref": "#/$defs/layer",
+      "description": "Settings and extensions applied to every managed profile."
+    },
+    "groups": {
+      "type": "object",
+      "description": "Reusable bundles of settings and extensions that a profile can include by name.",
+      "additionalProperties": { "$ref": "#/$defs/layer" }
+    },
+    "default": {
+      "$ref": "#/$defs/defaultProfile",
+      "description": "The built-in Default profile (always present; cannot be renamed). Has no icon and no use_default flags."
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Named (non-default) profiles, keyed by profile name. The Default profile is configured under [default], never here.",
+      "propertyNames": {
+        "not": { "const": "Default" },
+        "$comment": "[profiles.Default] is rejected on load; use [default] instead."
+      },
+      "additionalProperties": { "$ref": "#/$defs/profileConfig" }
+    }
+  },
+  "$defs": {
+    "extensionId": {
+      "type": "string",
+      "description": "Extension identifier 'publisher.name', optionally pinned as 'publisher.name@version'. Pins are parsed but not enforced for membership.",
+      "pattern": "^[a-z0-9][a-z0-9-]*\\.[a-z0-9][a-z0-9-]*(@.+)?$"
+    },
+    "extensionList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/extensionId" },
+      "uniqueItems": true
+    },
+    "settings": {
+      "type": "object",
+      "description": "VS Code settings keys mapped to any JSON value. Keys are dotted setting names (e.g. \"editor.formatOnSave\"). null values are not supported (TOML has no null) and are stripped on write.",
+      "additionalProperties": true
+    },
+    "useDefault": {
+      "type": "object",
+      "description": "Resource types this profile inherits from the Default profile (VS Code's useDefaultFlags). A true value means the editor reads the Default profile's copy and no profile-local file is written.",
+      "propertyNames": {
+        "enum": [
+          "settings",
+          "keybindings",
+          "snippets",
+          "tasks",
+          "extensions",
+          "globalState",
+          "mcp",
+          "prompts",
+          "languageModels"
+        ]
+      },
+      "additionalProperties": { "type": "boolean" }
+    },
+    "editorRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Editor name to match during discovery (product.json nameShort or applicationName), e.g. \"VSCodium\" or \"Code - OSS\"."
+        },
+        "binary": {
+          "type": "string",
+          "description": "Explicit launcher path, bypassing PATH discovery."
+        },
+        "user_dir": {
+          "type": "string",
+          "description": "Override for the editor's User/ directory (wrapper script, --user-data-dir, or portable install)."
+        },
+        "extensions_dir": {
+          "type": "string",
+          "description": "Override for the shared extensions directory. Note: Code - OSS and VSCodium share .vscode-oss by default."
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "settings": {
+          "$ref": "#/$defs/settings",
+          "description": "Settings keys applied to profiles using this layer."
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensionList",
+          "description": "Extension IDs applied to profiles using this layer."
+        }
+      }
+    },
+    "defaultProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of groups this profile includes."
+        },
+        "settings": {
+          "$ref": "#/$defs/settings",
+          "description": "Profile-specific settings (highest precedence)."
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensionList",
+          "description": "Profile-specific extensions."
+        },
+        "exclude_extensions": {
+          "$ref": "#/$defs/extensionList",
+          "description": "Extension IDs to drop even if a group or global adds them."
+        }
+      }
+    },
+    "profileConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "type": "string",
+          "description": "Codicon ID used as the profile icon (e.g. \"package\", \"briefcase\"). See the codicon reference: https://microsoft.github.io/vscode-codicons/dist/codicon.html",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "groups": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of groups this profile includes (applied in listed order)."
+        },
+        "settings": {
+          "$ref": "#/$defs/settings",
+          "description": "Profile-specific settings (highest precedence)."
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensionList",
+          "description": "Profile-specific extensions."
+        },
+        "exclude_extensions": {
+          "$ref": "#/$defs/extensionList",
+          "description": "Extension IDs to drop even if a group or global adds them."
+        },
+        "use_default": {
+          "$ref": "#/$defs/useDefault",
+          "description": "Resource types this profile inherits from the Default profile."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "editor": { "name": "VSCodium" },
+      "global": {
+        "extensions": ["editorconfig.editorconfig", "usernamehw.errorlens"],
+        "settings": { "editor.formatOnSave": true, "files.trimTrailingWhitespace": true }
+      },
+      "groups": {
+        "web": {
+          "extensions": ["dbaeumer.vscode-eslint", "esbenp.prettier-vscode"],
+          "settings": { "editor.defaultFormatter": "esbenp.prettier-vscode" }
+        }
+      },
+      "default": { "extensions": ["brunnerh.insert-unicode"] },
+      "profiles": {
+        "Rust": {
+          "icon": "package",
+          "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"],
+          "use_default": { "keybindings": true }
+        },
+        "TaqsWeb V2": {
+          "icon": "briefcase",
+          "groups": ["web"],
+          "exclude_extensions": ["usernamehw.errorlens"],
+          "use_default": { "keybindings": true }
+        }
+      }
+    }
+  ]
+}

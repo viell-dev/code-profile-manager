@@ -61,3 +61,6 @@ toml = "1.1.2"
 
 [dev-dependencies]
 tempfile = "3.23.0"
+# Drift guard: validate emitted configs against the committed schema. No remote
+# refs are used, so the network-backed retrievers are disabled.
+jsonschema = { version = "0.46.6", default-features = false }

@@ -59,8 +59,12 @@ Deviations from the design below, kept deliberately simple for the MVP:
   by intersection. Default-on at `init`; also an interactive menu action.
 - **Interactive menu** can switch the target editor ("Choose a different editor") without
   restarting.
-- **No JSON Schema yet** — generated configs carry a plain header instead of a `#:schema`
-  directive. A `schemars`-derived schema (PLAN §2.1) is still optional/future.
+- **JSON Schema + docs** — `schema/config.schema.json` is hand-maintained (not
+  `schemars`-derived; the format is small and a curated schema gives better hover
+  text/enums/regex constraints) and `docs/config.md` is the standalone reference.
+  Generated configs carry a `#:schema` directive on the first line pointing at the schema
+  raw URL on `main`. A drift-guard unit test validates an emitted config against the
+  committed schema. Pinning the URL to release tags is future work (nothing is tagged yet).
 - **Keybindings / snippets / tasks / MCP** are not synced yet.
 - **Shared extension pool caveat**: the Default profile's extension list is the shared
   pool's own `extensions.json`, which Code - OSS and VSCodium share — `sync` on the
@@ -71,8 +75,9 @@ Deviations from the design below, kept deliberately simple for the MVP:
 ## Remaining work / roadmap
 
 Near-term polish:
-- **JSON Schema + `docs/config.md`** — `schemars`-derived schema (§2.1) and a standalone
-  config reference; today generated configs carry only a comment header.
+- ✅ **JSON Schema + `docs/config.md`** — hand-maintained `schema/config.schema.json` +
+  standalone `docs/config.md`; generated configs carry a `#:schema` directive (raw URL on
+  `main`); a unit test guards schema/struct drift.
 - **Resources beyond settings + extensions** — keybindings, snippets, tasks, MCP
   (honoring `useDefaultFlags` per resource, §1.4).
 - **Destructive `--prune` push** — let push delete editor-only settings / uninstall
@@ -353,20 +358,21 @@ keys; merge precedence) is explained in a `docs/config.md` reference and in doc 
 on the Rust config structs. The docs are the source of truth and must stand alone
 without any editor tooling.
 
-**Nice-to-have: a JSON Schema** for in-editor completion/validation via **Taplo** (the
-LSP behind "Even Better TOML"). It's not a deliverable to gate on and not hand-
-maintained — `schemars` derives it from the same config structs (and their doc
-comments) basically for free, so it stays in lockstep with the code. When present it's
-wired self-contained via a first-line directive, with the doc comments becoming hover
-text:
+**Implemented: a JSON Schema** for in-editor completion/validation via **Taplo** (the LSP
+behind "Even Better TOML"). It is **hand-maintained** at `schema/config.schema.json`
+rather than `schemars`-derived: the config format is small and stable, a curated schema
+gives better hover text/enums/regex constraints, and it avoids a runtime dependency. It is
+kept in lockstep with the config structs by a drift-guard unit test that validates an
+emitted config against the committed schema (failing if the binary emits/accepts something
+the schema rejects). It's wired self-contained via a first-line directive pointing at the
+raw URL on `main` (pinning to release tags is future work — nothing is tagged yet):
 
 ```toml
-#:schema ./schema/config.schema.json
+#:schema https://raw.githubusercontent.com/viell-dev/code-profile-manager/main/schema/config.schema.json
 ```
 
-Optionally a `.taplo.toml` maps the config glob to the schema for `taplo check` in CI.
-Either way the binary validates structurally via `serde` at load — the schema only adds
-authoring ergonomics. Constraints worth encoding when generated: `icon` → Codicon-ID
+The binary validates structurally via `serde` at load — the schema only adds authoring
+ergonomics (and needs network in-editor to fetch the raw URL). Constraints worth encoding when generated: `icon` → Codicon-ID
 `enum` (from the upstream codicon manifest); `[editor].name` examples; `use_default`
 keys = `ProfileResourceType` (§1.4); extension IDs →
 `^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*(@.+)?$`; `vsix` → `.vsix` paths.
@@ -620,8 +626,9 @@ interactive conflicts (e.g. `dialoguer`/`inquire`). Avoid `rusqlite` — `state.
    `settings.json`/`extensions.json`. `status`, `list-profiles`, `detect` work end to end
    against Code - OSS and VSCodium.
 2. ✅ **Config + resolve** — config structs (documented via doc comments), layering/merge
-   (§2.3), `init` (import current state → first snapshot, repo starts converged), plus
-   behavior-preserving consolidation. *(Pending: `docs/config.md` + `schemars` schema.)*
+   (§2.3), `init` (import current state → first snapshot, repo starts converged),
+   behavior-preserving consolidation, the standalone `docs/config.md` reference, and a
+   hand-maintained `schema/config.schema.json` wired via a `#:schema` directive.
 3. ✅ **Push** — apply settings (JSONC merge) + tiered extension adds with safety,
    atomic writes, backups, `--dry-run`. Honors `useDefaultFlags`. *(Non-destructive;
    `--prune` pending.)*

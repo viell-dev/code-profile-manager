@@ -14,6 +14,14 @@ use serde_json::Value;
 
 use crate::editor::profiles::DEFAULT_PROFILE;
 
+/// Header prepended to a serialized config: a Taplo `#:schema` directive (so
+/// TOML-aware editors offer completion/validation against the published schema)
+/// followed by a human pointer to the reference docs.
+const CONFIG_HEADER: &str = concat!(
+    "#:schema https://raw.githubusercontent.com/viell-dev/code-profile-manager/main/schema/config.schema.json\n",
+    "# code-profile-manager editor config. See docs/config.md for the format.\n"
+);
+
 /// Top-level config document.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -116,9 +124,7 @@ impl Config {
     /// Serialize the config to a TOML string with a generated-file header.
     pub fn to_toml(&self) -> Result<String> {
         let body = toml::to_string_pretty(&self.sanitized()).context("serializing config")?;
-        Ok(format!(
-            "# code-profile-manager editor config. See README.md for the format.\n\n{body}"
-        ))
+        Ok(format!("{CONFIG_HEADER}\n{body}"))
     }
 
     /// A clone with all settings null values stripped (TOML has no null type).
@@ -463,6 +469,95 @@ mod tests {
         assert!(
             !p.extensions.contains("pub.global"),
             "exclude removed a global extension"
+        );
+    }
+
+    /// A config exercising every layer the schema describes: an editor ref, a
+    /// `[global]` layer, a `[groups.*]` bundle, `[default]`, and a named profile
+    /// with `icon`, `use_default`, and `exclude_extensions`.
+    fn representative_config() -> Config {
+        let mut config = Config::default();
+        config.editor.name = Some("VSCodium".to_owned());
+        config
+            .global
+            .settings
+            .insert("editor.formatOnSave".to_owned(), json!(true));
+        config
+            .global
+            .extensions
+            .push("editorconfig.editorconfig".to_owned());
+        config.groups.insert(
+            "web".to_owned(),
+            Layer {
+                settings: BTreeMap::from([(
+                    "editor.defaultFormatter".to_owned(),
+                    json!("esbenp.prettier-vscode"),
+                )]),
+                extensions: vec!["dbaeumer.vscode-eslint".to_owned()],
+            },
+        );
+        config
+            .default
+            .extensions
+            .push("brunnerh.insert-unicode".to_owned());
+        config.profiles.insert(
+            "Rust".to_owned(),
+            ProfileConfig {
+                icon: Some("package".to_owned()),
+                groups: vec!["web".to_owned()],
+                extensions: vec!["rust-lang.rust-analyzer".to_owned()],
+                exclude_extensions: vec!["editorconfig.editorconfig".to_owned()],
+                use_default: BTreeMap::from([("keybindings".to_owned(), true)]),
+                ..ProfileConfig::default()
+            },
+        );
+        config
+    }
+
+    /// The emitted TOML, as a JSON value the schema validator understands.
+    /// TOML comments (the `#:schema` / header lines) are ignored by the parser.
+    fn config_as_json(config: &Config) -> serde_json::Value {
+        let toml_str = config.to_toml().unwrap();
+        let doc: toml::Value = toml::from_str(&toml_str).unwrap();
+        serde_json::to_value(doc).unwrap()
+    }
+
+    fn schema_validator() -> jsonschema::Validator {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../schema/config.schema.json")).unwrap();
+        jsonschema::validator_for(&schema).unwrap()
+    }
+
+    #[test]
+    fn emitted_config_validates_against_schema() {
+        let validator = schema_validator();
+        let instance = config_as_json(&representative_config());
+        let errors: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|e| format!("{} at {}", e, e.instance_path()))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "emitted config should match the committed schema; drift detected:\n{}",
+            errors.join("\n")
+        );
+    }
+
+    #[test]
+    fn schema_rejects_malformed_config() {
+        let validator = schema_validator();
+
+        assert!(
+            !validator.is_valid(&json!({ "global": { "extensions": ["NotAValidId"] } })),
+            "a malformed extension id must fail validation"
+        );
+        assert!(
+            !validator.is_valid(&json!({ "bogus": true })),
+            "an unknown top-level key must fail validation"
+        );
+        assert!(
+            !validator.is_valid(&json!({ "profiles": { "Default": {} } })),
+            "[profiles.Default] must fail validation; use [default]"
         );
     }
 

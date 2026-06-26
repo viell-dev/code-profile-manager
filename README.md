@@ -25,7 +25,9 @@ sandboxes, remote systems, or shared profile baselines.
 - **Resources:** settings + extensions.
 - **Config:** TOML — `[global]`, reusable `[groups.*]`, the built-in `[default]` profile,
   and named `[profiles.*]`. The interactive flow (and `init`) can **consolidate** settings
-  and extensions shared across your profiles into `[global]` for you.
+  and extensions shared across your profiles into `[global]` for you. See
+  [`docs/config.md`](./docs/config.md) for the full format; generated configs carry a
+  `#:schema` directive so TOML-aware editors offer completion and validation.
 - **Interactive by default:** run with no arguments → pick an editor (or enter a custom
   path), optionally create a config from the editor's current profiles, then a menu:
   Sync / overwrite profiles from config / overwrite config from profiles / exit. Each is
@@ -126,8 +128,8 @@ support `--dry-run`.
 
 Working today: settings + extensions, across the built-in Default and named profiles,
 with consolidation and VSIX vendoring. Planned (see [`PLAN.md`](./PLAN.md) for detail):
-keybindings / snippets / tasks / MCP, a destructive `--prune` push, schema-assisted
-config editing, and a GUI over the same engine.
+keybindings / snippets / tasks / MCP, a destructive `--prune` push, and a GUI over the
+same engine.
 
 ## Building
 
