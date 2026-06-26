@@ -742,22 +742,39 @@ fn manage_profile_menu(session: &mut Session, g: &GlobalArgs) -> Result<()> {
     }
 }
 
+/// A scoped action offered in the per-profile submenu.
+#[derive(Clone, Copy)]
+enum ProfileAction {
+    Status,
+    Sync,
+    Push,
+    Pull,
+    Delete,
+}
+
 /// Actions scoped to one profile. Returns to the profile list on Back, or after
-/// the profile is deleted.
+/// the profile is deleted. Delete is not offered for the Default profile.
 fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Result<()> {
-    let actions = [
-        "Status / drift",
-        "Sync this profile",
-        "Push this profile (config -> editor)",
-        "Pull this profile (editor -> config)",
-        "Delete this profile",
-        "Back",
-    ];
     loop {
-        let choice = ui::select(&format!("Profile: {name}"), &actions.map(str::to_owned))
-            .context("reading action choice")?;
-        match choice {
-            0 => {
+        let mut actions: Vec<(ProfileAction, &str)> = vec![
+            (ProfileAction::Status, "Status / drift"),
+            (ProfileAction::Sync, "Sync this profile"),
+            (ProfileAction::Push, "Push this profile (config -> editor)"),
+            (ProfileAction::Pull, "Pull this profile (editor -> config)"),
+        ];
+        if name != profiles::DEFAULT_PROFILE {
+            actions.push((ProfileAction::Delete, "Delete this profile"));
+        }
+        let mut labels: Vec<String> = actions.iter().map(|(_, label)| (*label).to_owned()).collect();
+        labels.push("Back".to_owned());
+
+        let choice =
+            ui::select(&format!("Profile: {name}"), &labels).context("reading action choice")?;
+        let Some((action, _)) = actions.get(choice) else {
+            return Ok(()); // Back
+        };
+        match action {
+            ProfileAction::Status => {
                 let ctx = scoped_ctx(
                     &session.editor,
                     g,
@@ -767,7 +784,7 @@ fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Res
                 );
                 sync::status(&ctx, &session.config)?;
             }
-            1 => {
+            ProfileAction::Sync => {
                 session.ensure_editor_closed(g)?;
                 ui::heading(format!("Syncing {name}"));
                 let ctx = scoped_ctx(
@@ -781,7 +798,7 @@ fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Res
                 session.save_config(g.dry_run)?;
                 session.save_snapshot(g.dry_run)?;
             }
-            2 => {
+            ProfileAction::Push => {
                 session.ensure_editor_closed(g)?;
                 ui::heading(format!("Pushing {name} to editor"));
                 let ctx = scoped_ctx(
@@ -794,7 +811,7 @@ fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Res
                 sync::push(&ctx, &session.config, &mut session.snapshot)?;
                 session.save_snapshot(g.dry_run)?;
             }
-            3 => {
+            ProfileAction::Pull => {
                 ui::heading(format!("Pulling {name} into config"));
                 let ctx = scoped_ctx(
                     &session.editor,
@@ -807,12 +824,11 @@ fn profile_action_menu(session: &mut Session, g: &GlobalArgs, name: &str) -> Res
                 session.save_config(g.dry_run)?;
                 session.save_snapshot(g.dry_run)?;
             }
-            4 => {
+            ProfileAction::Delete => {
                 if delete_profile_action(session, g, name)? {
                     return Ok(()); // profile gone; back to the list
                 }
             }
-            _ => return Ok(()),
         }
     }
 }
