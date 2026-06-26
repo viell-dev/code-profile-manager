@@ -21,7 +21,9 @@ default" inheritance (e.g. profiles that share the default keybindings).
 - **Editors:** discovered by binary + `product.json` (handles forks generically); tested
   against **Code - OSS** and **VSCodium**. Per-editor config; `--editor` selects one.
 - **Resources:** settings + extensions.
-- **Config:** TOML — `[global]`, reusable `[groups.*]`, and `[profiles.*]`.
+- **Config:** TOML — `[global]`, reusable `[groups.*]`, the built-in `[default]` profile,
+  and named `[profiles.*]`. The interactive flow (and `init`) can **consolidate** settings
+  and extensions shared across your profiles into `[global]` for you.
 - **Interactive by default:** run with no arguments → pick an editor (or enter a custom
   path), optionally create a config from the editor's current profiles, then a menu:
   Sync / overwrite profiles from config / overwrite config from profiles / exit. Each is
@@ -61,10 +63,14 @@ code-profile-sync
 ```
 
 Selectors match an editor's `nameShort` or `applicationName` (e.g. `VSCodium`,
-`"Code - OSS"`, `code-oss`). `--config <path>` overrides the default config file
-(`<applicationName>.toml` in the working directory). `--profile <name>` limits an
-operation to one profile. The snapshot used for 3-way sync lives in
-`.code-profile-sync/` next to the config.
+`"Code - OSS"`, `code-oss`). `--profile <name>` limits an operation to one profile.
+
+**Where files live.** By default the config is `<applicationName>.toml` in the current
+directory (e.g. `vscodium.toml`); the 3-way sync snapshot and backups go under
+`.code-profile-sync/`, and vendored extensions under `vendor/extensions/`, both next to
+the config. Use `--config <path>` to put the config elsewhere. (A future version will
+default to a per-user app directory such as `$XDG_CONFIG_HOME/code-profile-sync/` instead
+of the working directory — see [`PLAN.md`](./PLAN.md).)
 
 ### Behavior notes
 
@@ -81,6 +87,13 @@ The editor **must be closed** while writing — it owns these files and will ove
 changes on exit. Mutating commands detect a running editor and refuse without
 `--force`, write atomically, take backups (under `.code-profile-sync/backups/`), and
 support `--dry-run`.
+
+## Roadmap
+
+Working today: settings + extensions, across the built-in Default and named profiles,
+with consolidation and VSIX vendoring. Planned (see [`PLAN.md`](./PLAN.md) for detail):
+keybindings / snippets / tasks / MCP, a destructive `--prune` push, schema-assisted
+config editing, a per-user default config directory, and a GUI over the same engine.
 
 ## Building
 

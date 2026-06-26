@@ -1,21 +1,18 @@
 # AGENTS.md
 
-Agent guide for the **Code Profile Sync** repo. Read [`PLAN.md`](./PLAN.md) for the
-full design before non-trivial work.
+Agent guide for the **Code Profile Sync** repo. The design and current status live in
+[`PLAN.md`](./PLAN.md) — read it before non-trivial work and keep it in sync when the
+design changes. This file only covers how to work in the repo and the things that will
+bite you; it links to PLAN.md rather than restating it.
 
 ## What this is
 
-A Rust CLI (GUI later) that syncs settings + extensions across profiles of a VS Code
-OSS–based editor against a declarative TOML config. v1: settings + extensions only.
-Test targets are **Code - OSS** and **VSCodium** (both installed on the dev machine);
-VS Code/Cursor are not installed.
-
-**Editors are discovered by binary, not config dir.** Resolve launchers on PATH
-(`code`, `code-oss`, `codium`, `vscodium`, …) via `readlink -f`, then read
-`resources/app/product.json` for identity (`nameShort` → user-data dir,
-`dataFolderName` → extensions dir, `applicationName` → CLI). The command name is
-ambiguous — `code` may be Code - OSS *or* VS Code depending on the machine. Ignore
-leftover config dirs from uninstalled editors.
+A Rust CLI (GUI later) that syncs **settings + extensions** across the profiles of a
+VS Code OSS–based editor against a declarative TOML config. Editors are **discovered by
+binary and identified via `product.json`**, not by config directory — see
+[PLAN.md §0](./PLAN.md). Test targets are **Code - OSS** and **VSCodium** (both on the
+dev machine; VS Code/Cursor are not installed). For the full feature status and what's
+left, see the "Implementation status" and "Remaining work / roadmap" sections of PLAN.md.
 
 ## Build / check
 
@@ -32,34 +29,34 @@ Toolchain is pinned in `rust-toolchain.toml` (don't bump without reason).
 
 - Follow the user-global **`rust-code-style`** skill.
 - Lints are strict (see `Cargo.toml`): `unwrap_used`, `expect_used`, `todo`,
-  `unimplemented`, `panic`-adjacent, `indexing_slicing`, `arithmetic_side_effects`,
-  `as_conversions`, `print_stdout`/`print_stderr` all warn; `unsafe_code` is **denied**.
-  Use `?` with explicit error types (`thiserror`), checked arithmetic, and a real
-  output/logging layer instead of `println!`/`eprintln!`. If you must allow a lint,
-  use `#[allow(..., reason = "…")]` (the repo requires a reason).
+  `unimplemented`, `indexing_slicing`, `arithmetic_side_effects`, `as_conversions`,
+  `print_stdout`/`print_stderr` all warn; `unsafe_code` is **denied**.
+- Errors use **`anyhow`** with `?`/`.context(...)`; arithmetic is checked
+  (`saturating_add`, `try_from`); all user-facing output goes through `ui.rs` (the only
+  place the `print_*` lints are scoped). To silence a lint, prefer
+  `#[expect(lint, reason = "…")]` on the smallest scope (the repo requires a reason).
 - Match the surrounding code's idioms, naming, and comment density.
 
 ## Domain landmines (get these wrong and you corrupt a user's editor)
 
-- **Editor must be closed for writes.** It owns `storage.json`/`extensions.json` and
-  overwrites on exit. Detect a running editor; refuse without `--force`.
-- **`useDefaultFlags`** in `storage.json` mean a profile *inherits* a resource from the
-  Default profile. Never write a profile-local file for an inherited resource. All real
-  profiles on the dev's machine inherit `keybindings` — treat inheritance as core.
-- **Extensions are a shared install + per-profile membership list.** `extensions.json`
-  entries with no corresponding folder in the shared dir dangle. `location.path` is
-  machine-specific; portable identity is `identifier.id` + `version`. Writes are
-  **tiered**: shared pool → vendored copy → editor CLI. VSIX-source extensions
-  (`metadata.source == "vsix"`) are vendored into `<config_dir>/vendor/extensions/`
-  (folder + `<relativeLocation>.entry.json` sidecar) on pull/sync and restored on push.
-  Removing from a profile must not delete the shared folder.
-- **The Default profile** lives at `User/` root, not under `User/profiles/`.
-- **Shared extensions pool:** Code - OSS and VSCodium both default `dataFolderName` to
-  `.vscode-oss`, so they share `~/.vscode-oss/extensions` while keeping separate
-  per-profile membership. Don't assume one extensions dir = one editor; GC must check
-  membership across all editors resolving to that dir before pruning.
-- **Settings files are JSONC** (comments, trailing commas) — parse tolerantly.
-- **Always write atomically** (temp + rename), back up before first write, and support
+Each links to the authoritative explanation in PLAN.md.
+
+- **Editor must be closed for writes** — it owns `storage.json`/`extensions.json` and
+  overwrites on exit. Gate on a running process; allow `--force`. See
+  [PLAN.md §3.4](./PLAN.md).
+- **`useDefaultFlags`** — a profile may inherit a resource from Default; never write a
+  profile-local file for an inherited one. [PLAN.md §1.4](./PLAN.md).
+- **Extensions = shared install + per-profile membership** — adds are tiered (pool →
+  vendored copy → editor CLI); removals edit only the membership list; never delete shared
+  folders; refuse removing from Default (its list *is* the shared pool). VSIX-source
+  extensions are vendored. [PLAN.md §1.2 and §4](./PLAN.md).
+- **Shared pool collision** — Code - OSS and VSCodium share `~/.vscode-oss/extensions`; one
+  extensions dir ≠ one editor (matters for `gc`). [PLAN.md §1.2](./PLAN.md).
+- **The Default profile** lives at `User/` root, not `User/profiles/`, and is configured
+  under `[default]`, never `[profiles.Default]`. [PLAN.md §1.1 and §2](./PLAN.md).
+- **Settings files are JSONC** — parse tolerantly; nulls are stripped (TOML has no null).
+  [PLAN.md §5](./PLAN.md).
+- **Always write atomically** (temp + rename), back up before the first write, and honor
   `--dry-run`.
 
 ## Conventions
@@ -67,4 +64,4 @@ Toolchain is pinned in `rust-toolchain.toml` (don't bump without reason).
 - Use the **`git-conventions`** skill for commits; **`agent-attribution`** for any
   user-visible content/commits.
 - Project paths contain spaces — quote them; never `cd` to CWD; never backslash-escape.
-- Keep `PLAN.md` in sync when the design changes.
+- AI files (`AGENTS.md`, `CLAUDE.md`) are globally git-ignored; force-add to commit them.

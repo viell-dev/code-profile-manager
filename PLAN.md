@@ -56,6 +56,75 @@ Deviations from the design below, kept deliberately simple for the MVP:
 
 ---
 
+## Remaining work / roadmap
+
+Near-term polish:
+- **Config & state storage location** — adopt a per-user app dir as the default (below).
+- **JSON Schema + `docs/config.md`** — `schemars`-derived schema (§2.1) and a standalone
+  config reference; today generated configs carry only a comment header.
+- **Resources beyond settings + extensions** — keybindings, snippets, tasks, MCP
+  (honoring `useDefaultFlags` per resource, §1.4).
+- **Destructive `--prune` push** — let push delete editor-only settings / uninstall
+  extras (today only `sync` propagates removals).
+- **`gc`** for pool extension folders no longer referenced by any profile *across all
+  editors sharing the pool* (§1.2 collision).
+- **Comment/formatting preservation** in settings files (CST-level edits, §5).
+- **Deep object merge** for settings layering (today: per-top-level-key replace, §2.3).
+
+Cross-platform & quality:
+- **Testing & CI** (below) — fixture-based engine tests on Linux/Windows/macOS plus an
+  optional real-editor smoke job.
+- **Data-driven `editor/paths.rs`** — inject platform + env instead of `cfg!`, so the
+  Windows/macOS path rules are unit-testable on a single Linux runner.
+- **More editors** — the `product.json` layer makes new forks mostly free; verify VS Code
+  and Cursor when available.
+
+Larger:
+- **GUI** (§7) — a desktop front-end over the same engine library: browse a marketplace
+  to pick extensions, assign to groups/profiles, visualize drift/conflicts. A stable
+  storage dir (below) matters most here.
+- **Per-editor scope/defaults registry** — a versioned *data* file (community-maintainable,
+  decoupled from the binary) describing setting scopes and defaults, to handle
+  application-scoped settings and default-value awareness (§8). Degrades gracefully to
+  today's behavior when absent.
+
+## Config & state storage location
+
+Today: the config defaults to `<applicationName>.toml` in the **current working
+directory**; the 3-way snapshot and backups live under `.code-profile-sync/` next to it,
+and vendored extensions under `vendor/extensions/` next to it. `--config <path>`
+overrides the config location.
+
+Planned default: a per-user application directory, with `--config` still overriding —
+- Linux: `$XDG_CONFIG_HOME/code-profile-sync/` (fallback `~/.config/code-profile-sync/`)
+- macOS: `~/Library/Application Support/code-profile-sync/`
+- Windows: `%APPDATA%\code-profile-sync\`
+
+holding the per-editor configs (e.g. `vscodium.toml`), their snapshots, and vendored
+extensions. This gives the tool — and especially a future **GUI** — a stable,
+discoverable home instead of depending on the working directory.
+
+## Testing & CI
+
+Most of the cross-platform surface (discovery, `product.json` parsing, path derivation,
+config layering/consolidation, the sync engine) is pure logic over files + env vars, so
+it can be tested **without a real editor**: build fixture install trees
+(`…/resources/app/product.json`) and fake `User/` + extensions directories, and point the
+tool at them via env (`$HOME` / `$APPDATA` / `$XDG_CONFIG_HOME`) and the
+`user_dir`/`extensions_dir` overrides (already exercised with scratch dirs).
+
+- **CI:** GitHub Actions with `matrix.os: [ubuntu, windows, macos]` for the fixture-based
+  engine tests — free for public repos. Alternatives: Azure Pipelines (best free tier for
+  private OSS), Cirrus CI (good real macOS), AppVeyor (Windows).
+- **Real-editor smoke job** (separate / nightly / `workflow_dispatch`): install editors
+  per OS — VSCodium via `choco`/`brew`, VS Code via `choco`/`brew`/`winget`, Cursor
+  optional — and exercise the two parts that need a real binary: editor-CLI extension
+  install and running-process detection.
+- **Code - OSS** has no clean Windows/macOS prebuilt (Linux distro only), so its coverage
+  stays local; **VSCodium** is its cross-platform stand-in (same `dataFolderName`).
+
+---
+
 ## 0. Editor discovery — detect binaries, identify via `product.json`
 
 **Detect installed editors by their binaries, not their config directories** (stale
@@ -226,7 +295,11 @@ which. Layering keeps common things DRY:
 - **`[global]`** — settings + extensions applied to *every* managed profile.
 - **`[groups.<name>]`** — reusable bundles (settings + extensions) a profile can
   include. Models "common across most" without repeating.
-- **`[profiles.<name>]`** — per-profile: which groups it includes, profile-specific
+- **`[default]`** — the built-in Default profile (always present, cannot be renamed).
+  Takes the same fields as a named profile *except* `icon` and `use_default` (which
+  don't apply to it). It is **not** put under `[profiles.*]`; a config with
+  `[profiles.Default]` is rejected on load.
+- **`[profiles.<name>]`** — per named profile: which groups it includes, profile-specific
   settings/extensions, an optional exclude list (to drop a global/group item for this
   profile), and desired `use_default` flags.
 
@@ -259,7 +332,7 @@ keys = `ProfileResourceType` (§1.4); extension IDs →
 ### 2.2 Sketch
 
 ```toml
-#:schema ./schema/config.schema.json
+# code-profile-sync config. See README.md for the format.
 
 [editor]
 # Match a discovered editor (§0) by product.json nameShort or applicationName.
@@ -269,43 +342,52 @@ name = "VSCodium"                 # e.g. "VSCodium", "Code - OSS"
 # extensions_dir = "…"            # optional override (--extensions-dir; note .vscode-oss is shared)
 
 [global]
-settings = { "editor.formatOnSave" = true, "files.trimTrailingWhitespace" = true }
 extensions = ["editorconfig.editorconfig", "usernamehw.errorlens"]
+[global.settings]
+"editor.formatOnSave" = true
+"files.trimTrailingWhitespace" = true
 
 [groups.web]
 extensions = ["dbaeumer.vscode-eslint", "esbenp.prettier-vscode"]
-settings = { "editor.defaultFormatter" = "esbenp.prettier-vscode" }
+[groups.web.settings]
+"editor.defaultFormatter" = "esbenp.prettier-vscode"
 
-[groups.work]
-extensions = ["eamodio.gitlens"]
+# The built-in Default profile (no icon / use_default).
+[default]
+extensions = ["brunnerh.insert-unicode"]
 
 [profiles.Rust]
 icon = "package"
-groups = []
 extensions = ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]
-# Local .vsix files (not on any marketplace), vendored in the repo for portability:
-vsix = ["vendor/extensions/my-internal-tool-1.2.0.vsix"]
 use_default = { keybindings = true }   # inherits Default keybindings
 
 [profiles."TaqsWeb V2"]
 icon = "briefcase"
-groups = ["web", "work"]
+groups = ["web"]
 exclude_extensions = ["usernamehw.errorlens"]  # opt out of a global ext here
 use_default = { keybindings = true }
 ```
+
+> Local (VSIX-source) extensions need no special config field: they are vendored
+> automatically into `vendor/extensions/` and restored on push (see the status section
+> and §4).
 
 ### 2.3 Resolution (merge) semantics
 
 Effective per-profile desired state is computed deterministically:
 
-- **settings** = deep-merge of `global.settings` → each included `group.settings` (in
-  listed order) → `profile.settings`. Later wins per JSON key. Deep-merge objects;
-  replace arrays/scalars wholesale.
+- **settings** = `global.settings` → each included `group.settings` (in listed order) →
+  profile/`[default]` settings. Later wins, per **top-level key** (the MVP replaces a
+  key's value wholesale; recursive object deep-merge is future work).
 - **extensions** = `union(global, groups…, profile)` minus `exclude_extensions`. A
-  set of IDs; version is "latest compatible" unless pinned (`id@version`).
-- **use_default** flags are taken from the profile (not inherited from global/groups).
+  set of IDs; versions are ignored for membership in the MVP (`id@version` pins are
+  parsed but not enforced).
+- **use_default** flags are taken from the profile (not inherited from global/groups);
+  `[default]` has none.
 - A profile that inherits a resource ignores resolved settings/extensions for that
-  resource (with a warning if the config also specifies them).
+  resource.
+- **Consolidation** is the inverse refactor (status section): hoist what every profile
+  shares into `[global]` while keeping `resolve()` identical.
 
 The Default profile is addressable as the pseudo-profile **`Default`** (maps to
 `User/` root) so global keybindings/settings it owns can be managed too.
@@ -491,33 +573,41 @@ interactive conflicts (e.g. `dialoguer`/`inquire`). Avoid `rusqlite` — `state.
 
 ## 7. Milestones
 
-1. **Read-only foundation** — binary discovery + `product.json` identity (§0), derived
+1. ✅ **Read-only foundation** — binary discovery + `product.json` identity (§0), derived
    path layer, parse `storage.json` (profiles + flags), parse
-   `settings.json`/`extensions.json`. `status`, `list-profiles`, and a `detect` command
-   (show discovered editors) work end to end against Code - OSS and VSCodium.
-2. **Config + resolve** — config structs (documented via doc comments) + `docs/config.md`
-   reference, layering/merge (§2.3), `init` (import current state → first snapshot, repo
-   starts converged). Optional `schemars`-derived JSON Schema for editor tooling.
-3. **Push** — apply settings (JSONC merge) + extensions (hybrid) with safety,
-   atomic writes, backups, `--dry-run`. Honor `useDefaultFlags`.
-4. **Pull** — editor → repo at profile level + snapshot update.
-5. **Sync + interactive flow** — 3-way engine + interactive/`--prefer` conflict
-   resolution, and the first-run wizard + main menu (§3.5: select editor / custom path,
-   create-config-from-profiles, the Sync / Overwrite-either-way / Exit menu, and the
-   close-the-editor gate before any write). This is the v1 default entry point.
-6. **Hardening** — portable-install overrides, shared-extensions-dir-aware `gc`,
-   keybindings/snippets, more editors as discovered (the product.json layer makes new
-   forks mostly free), tests against fixture user-dirs.
-7. **GUI (later)** — select extensions from the editor's marketplace, assign to
-   groups/profiles, visualize drift/conflicts. Core engine is a library the GUI calls.
+   `settings.json`/`extensions.json`. `status`, `list-profiles`, `detect` work end to end
+   against Code - OSS and VSCodium.
+2. ✅ **Config + resolve** — config structs (documented via doc comments), layering/merge
+   (§2.3), `init` (import current state → first snapshot, repo starts converged), plus
+   behavior-preserving consolidation. *(Pending: `docs/config.md` + `schemars` schema.)*
+3. ✅ **Push** — apply settings (JSONC merge) + tiered extension adds with safety,
+   atomic writes, backups, `--dry-run`. Honors `useDefaultFlags`. *(Non-destructive;
+   `--prune` pending.)*
+4. ✅ **Pull** — editor → repo at profile level + snapshot update + VSIX vendoring.
+5. ✅ **Sync + interactive flow** — 3-way engine + interactive/`--prefer` conflict
+   resolution, first-run wizard + main menu (§3.5), close-the-editor gate, and switching
+   editors from the menu. The default entry point.
+6. ⏳ **Hardening** — portable-install overrides, shared-extensions-dir-aware `gc`,
+   keybindings/snippets/tasks/MCP, data-driven paths, fixture + CI tests, more editors.
+   *(See "Remaining work / roadmap".)*
+7. ⏳ **GUI (later)** — select extensions from the editor's marketplace, assign to
+   groups/profiles, visualize drift/conflicts. Core engine is a library the GUI calls;
+   needs the stable storage dir ("Config & state storage location").
 
 ---
 
 ## 8. Open questions / deferred
 
-- **Pull attribution**: pulled changes land at profile level; promoting into
-  groups/global is manual (v1) / GUI-assisted (later).
-- **Comment preservation** in settings files: deferred to v2 (CST edits).
+- **Pull attribution**: pulled changes land at profile level; consolidation hoists shared
+  items into `[global]`, but promoting into named `[groups.*]` stays manual / GUI-assisted.
+- **Comment preservation** in settings files: deferred (CST edits).
 - **globalState (`state.vscdb`)** and **workspaceStorage**: out of scope.
-- **`profileAssociations`** (workspace→profile pinning): preserved, not managed in v1.
+- **`profileAssociations`** (workspace→profile pinning): preserved, not managed.
 - **Open VSX vs MS Marketplace** availability gaps for the same ID across editors.
+- **Application-scoped settings** (e.g. `window.titleBarStyle`, `update.mode`,
+  `telemetry.*`): the editor only honors these in the Default profile and ignores copies
+  in named profiles. In the normal pull-driven flow this self-corrects (they're captured
+  only into `[default]`); the only untidy case is hand-authoring one into `[global]`/a
+  named profile, where push writes a harmless ignored key. A precise fix needs the
+  per-editor scope registry (roadmap), not a hardcoded prefix list (`window.*` would
+  wrongly catch the many genuinely per-profile window settings).
