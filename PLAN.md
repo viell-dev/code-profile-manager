@@ -40,9 +40,11 @@ Deviations from the design below, kept deliberately simple for the MVP:
   restored from there onto machines that don't have them installed (the path is rewritten
   to the local pool). Verified by vendoring from VSCodium and restoring onto a fresh
   extensions directory.
-- **Consolidation** (`Config::consolidate`) hoists settings/extensions common to every
-  profile into `[global]`, behavior-preservingly. Default-on at `init`; also an
-  interactive menu action.
+- **Consolidation** (`Config::consolidate`) hoists shared config into `[global]`,
+  behavior-preservingly (`resolve()` unchanged): a settings key present in *every*
+  profile is hoisted using its most-common value (when shared by ≥2 profiles) with
+  dissenting profiles keeping an override; extensions present in every profile are hoisted
+  by intersection. Default-on at `init`; also an interactive menu action.
 - **Interactive menu** can switch the target editor ("Choose a different editor") without
   restarting.
 - **No JSON Schema yet** — generated configs carry a plain header instead of a `#:schema`

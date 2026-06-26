@@ -212,23 +212,21 @@ impl Config {
         }
     }
 
-    /// Hoist settings and extensions common to *every* profile (including the
-    /// Default profile) into `[global]`, then re-express each profile as a delta.
+    /// Hoist shared settings and extensions into `[global]`, then re-express each
+    /// profile as a delta.
     ///
-    /// This is behavior-preserving: because only items present in every profile
-    /// are moved, `resolve()` produces the same result before and after.
+    /// Behavior-preserving (`resolve()` is unchanged):
+    /// - a settings key present in *every* profile is hoisted using its most
+    ///   common value (when shared by at least two profiles); profiles that
+    ///   disagree keep a profile-level override, since profile beats global;
+    /// - an extension present in every profile is hoisted (intersection).
     pub fn consolidate(&mut self) -> Consolidation {
         let resolved = self.resolve();
-        let mut profiles = resolved.values();
-        let Some(first) = profiles.next() else {
+        if resolved.is_empty() {
             return Consolidation::default();
-        };
-        let mut common_settings = first.settings.clone();
-        let mut common_extensions = first.extensions.clone();
-        for profile in profiles {
-            common_settings.retain(|key, value| profile.settings.get(key) == Some(value));
-            common_extensions.retain(|id| profile.extensions.contains(id));
         }
+        let common_settings = modal_common_settings(&resolved, &self.default.settings);
+        let common_extensions = intersect_extensions(&resolved);
 
         // Count only what is newly added to global.
         let existing_global: BTreeSet<String> = self
@@ -313,6 +311,84 @@ pub struct Consolidation {
 pub fn normalize_id(spec: &str) -> String {
     let id = spec.split('@').next().unwrap_or(spec);
     id.trim().to_lowercase()
+}
+
+/// Extensions present in every resolved profile (intersection).
+fn intersect_extensions(resolved: &BTreeMap<String, Resolved>) -> BTreeSet<String> {
+    let mut profiles = resolved.values();
+    let Some(first) = profiles.next() else {
+        return BTreeSet::new();
+    };
+    let mut common = first.extensions.clone();
+    for profile in profiles {
+        common.retain(|id| profile.extensions.contains(id));
+    }
+    common
+}
+
+/// For each settings key present in *every* profile, choose the value held by
+/// the most profiles (shared by at least two). Ties prefer the Default profile's
+/// value, then the lexicographically smallest, for determinism.
+fn modal_common_settings(
+    resolved: &BTreeMap<String, Resolved>,
+    default_settings: &BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let mut profiles = resolved.values();
+    let Some(first) = profiles.next() else {
+        return BTreeMap::new();
+    };
+    let mut keys: BTreeSet<&String> = first.settings.keys().collect();
+    for profile in profiles {
+        keys.retain(|key| profile.settings.contains_key(*key));
+    }
+
+    let mut out = BTreeMap::new();
+    for key in keys {
+        // Tally each distinct value (keyed by its serialized form).
+        let mut tally: BTreeMap<String, (usize, &Value)> = BTreeMap::new();
+        for profile in resolved.values() {
+            if let Some(value) = profile.settings.get(key) {
+                let serialized = serde_json::to_string(value).unwrap_or_default();
+                let counter = tally.entry(serialized).or_insert((0, value));
+                counter.0 = counter.0.saturating_add(1);
+            }
+        }
+        let default_serialized = default_settings
+            .get(key)
+            .and_then(|v| serde_json::to_string(v).ok());
+        if let Some(value) = pick_mode(&tally, default_serialized.as_deref()) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    out
+}
+
+/// Pick the winning value from a value tally: highest count (min 2), ties broken
+/// by matching the Default profile's value, then by smallest serialized form.
+fn pick_mode<'v>(
+    tally: &BTreeMap<String, (usize, &'v Value)>,
+    default_serialized: Option<&str>,
+) -> Option<&'v Value> {
+    let max_count = tally.values().map(|(count, _)| *count).max()?;
+    if max_count < 2 {
+        return None;
+    }
+    // Among values tied at the max count, prefer the Default's value; the BTreeMap
+    // iteration order (by serialized form) gives a deterministic fallback.
+    let mut winner: Option<(&str, &Value)> = None;
+    for (serialized, (count, value)) in tally {
+        if *count != max_count {
+            continue;
+        }
+        let prefer = default_serialized == Some(serialized.as_str());
+        if prefer {
+            return Some(value);
+        }
+        if winner.is_none() {
+            winner = Some((serialized, value));
+        }
+    }
+    winner.map(|(_, value)| value)
 }
 
 /// Recursively remove JSON `null` (TOML cannot represent it): `null` itself maps
@@ -442,6 +518,64 @@ mod tests {
         assert!(!config.default.settings.contains_key("shared"));
         let rust = config.profiles.get("Rust").unwrap();
         assert!(!rust.extensions.contains(&"pub.shared".to_owned()));
+    }
+
+    #[test]
+    fn consolidate_hoists_modal_value_and_keeps_overrides() {
+        let mut config = Config::default();
+        // "tab" is set in every profile, mostly 2 but 4 in one. "uniq" is set
+        // only in one profile, so it must not be hoisted.
+        config.default.settings.insert("tab".to_owned(), json!(2));
+        config.profiles.insert(
+            "A".to_owned(),
+            ProfileConfig {
+                settings: BTreeMap::from([("tab".to_owned(), json!(2))]),
+                ..ProfileConfig::default()
+            },
+        );
+        config.profiles.insert(
+            "B".to_owned(),
+            ProfileConfig {
+                settings: BTreeMap::from([
+                    ("tab".to_owned(), json!(4)),
+                    ("uniq".to_owned(), json!(true)),
+                ]),
+                ..ProfileConfig::default()
+            },
+        );
+
+        let before = config.resolve();
+        config.consolidate();
+        let after = config.resolve();
+
+        assert_eq!(before, after, "consolidation must preserve resolution");
+        // The modal value (2) lands in global; B keeps its override; uniq stays put.
+        assert_eq!(config.global.settings.get("tab"), Some(&json!(2)));
+        assert_eq!(
+            config.profiles.get("B").unwrap().settings.get("tab"),
+            Some(&json!(4))
+        );
+        assert!(!config.global.settings.contains_key("uniq"));
+        assert!(!config.default.settings.contains_key("tab"));
+    }
+
+    #[test]
+    fn consolidate_skips_keys_with_no_shared_value() {
+        let mut config = Config::default();
+        // "tab" present in all, but every value distinct -> no benefit to hoist.
+        config.default.settings.insert("tab".to_owned(), json!(1));
+        config.profiles.insert(
+            "A".to_owned(),
+            ProfileConfig {
+                settings: BTreeMap::from([("tab".to_owned(), json!(2))]),
+                ..ProfileConfig::default()
+            },
+        );
+
+        let before = config.resolve();
+        config.consolidate();
+        assert_eq!(before, config.resolve());
+        assert!(!config.global.settings.contains_key("tab"));
     }
 
     #[test]
