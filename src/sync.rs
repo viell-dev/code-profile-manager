@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::cli::Prefer;
-use crate::config::{Config, DefaultProfile, ProfileConfig, Resolved};
+use crate::config::{self, Config, DefaultProfile, ProfileConfig, Resolved};
 use crate::editor::Editor;
 use crate::editor::profiles::{self, Profile};
-use crate::extension::Catalog;
+use crate::extension::{Catalog, Membership};
 use crate::snapshot::{ProfileSnapshot, Snapshot};
 use crate::{extension, jsonc, safety, ui};
 
@@ -56,7 +56,7 @@ impl Ctx<'_> {
 /// The editor's actual tracked state for a profile.
 struct Actual {
     settings: BTreeMap<String, Value>,
-    extensions: BTreeSet<String>,
+    extensions: Membership,
 }
 
 fn read_actual(editor: &Editor, profile: &Profile) -> Result<Actual> {
@@ -69,7 +69,7 @@ fn read_actual(editor: &Editor, profile: &Profile) -> Result<Actual> {
         crate::config::sanitize_settings(&raw)
     };
     let extensions = if profile.inherits("extensions") {
-        BTreeSet::new()
+        Membership::new()
     } else {
         extension::read_membership(editor, profile)?
     };
@@ -77,6 +77,34 @@ fn read_actual(editor: &Editor, profile: &Profile) -> Result<Actual> {
         settings,
         extensions,
     })
+}
+
+/// Desired extensions the editor doesn't satisfy: absent, or (when pinned) not at
+/// the pinned version or not frozen. Floating ids are satisfied by any installed
+/// version. Returns normalized ids.
+fn ext_unsatisfied(desired: &BTreeMap<String, Option<String>>, actual: &Membership) -> Vec<String> {
+    desired
+        .iter()
+        .filter_map(|(id, pin)| {
+            let satisfied = match actual.get(id) {
+                None => false,
+                Some(state) => match pin {
+                    None => true,
+                    Some(version) => &state.version == version && state.pinned,
+                },
+            };
+            (!satisfied).then(|| id.clone())
+        })
+        .collect()
+}
+
+/// Installed extensions not wanted by the config (normalized ids).
+fn ext_extra(desired: &BTreeMap<String, Option<String>>, actual: &Membership) -> Vec<String> {
+    actual
+        .keys()
+        .filter(|id| !desired.contains_key(*id))
+        .cloned()
+        .collect()
 }
 
 /// Map of the editor's current profiles by name.
@@ -151,11 +179,13 @@ fn report_drift(want: &Resolved, actual: &Actual) {
             clean = false;
         }
     }
-    for id in want.extensions.difference(&actual.extensions) {
-        ui::bullet(format!("extension missing in editor: {id}"));
+    for id in ext_unsatisfied(&want.extensions, &actual.extensions) {
+        ui::bullet(format!(
+            "extension missing or wrong version in editor: {id}"
+        ));
         clean = false;
     }
-    for id in actual.extensions.difference(&want.extensions) {
+    for id in ext_extra(&want.extensions, &actual.extensions) {
         ui::bullet(format!("extension only in editor: {id}"));
         clean = false;
     }
@@ -199,7 +229,8 @@ pub fn profile_summaries(ctx: &Ctx<'_>, config: &Config) -> Result<Vec<ProfileSu
                     want.settings
                         .iter()
                         .all(|(k, v)| actual.settings.get(k) == Some(v))
-                        && want.extensions == actual.extensions,
+                        && ext_unsatisfied(&want.extensions, &actual.extensions).is_empty()
+                        && ext_extra(&want.extensions, &actual.extensions).is_empty(),
                 )
             }
             _ => None,
@@ -266,19 +297,18 @@ pub fn pull(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
             ));
         }
         let actual = read_actual(ctx.editor, profile)?;
-        all_extensions.extend(actual.extensions.iter().cloned());
-        capture_profile(
-            config,
-            snapshot,
-            name,
-            profile,
-            &actual.settings,
-            &actual.extensions,
-        );
+        // Capture pins from the editor: a frozen install round-trips to `id@version`.
+        let captured: BTreeMap<String, Option<String>> = actual
+            .extensions
+            .iter()
+            .map(|(id, state)| (id.clone(), state.pinned.then(|| state.version.clone())))
+            .collect();
+        all_extensions.extend(captured.keys().cloned());
+        capture_profile(config, snapshot, name, profile, &actual.settings, &captured);
         ui::bullet(format!(
             "captured {name} ({} settings, {} extensions)",
             actual.settings.len(),
-            actual.extensions.len()
+            captured.len()
         ));
     }
 
@@ -307,7 +337,7 @@ fn capture_profile(
     name: &str,
     editor_profile: &Profile,
     settings: &BTreeMap<String, Value>,
-    extensions: &BTreeSet<String>,
+    extensions: &BTreeMap<String, Option<String>>,
 ) {
     let base = baseline(config, name);
     let settings_delta: BTreeMap<String, Value> = settings
@@ -315,8 +345,19 @@ fn capture_profile(
         .filter(|(k, v)| base.settings.get(*k) != Some(*v))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let ext_add: Vec<String> = extensions.difference(&base.extensions).cloned().collect();
-    let ext_excl: Vec<String> = base.extensions.difference(extensions).cloned().collect();
+    // A profile-level delta is any id whose pin differs from what base provides;
+    // excludes are base ids absent here.
+    let ext_add: Vec<String> = extensions
+        .iter()
+        .filter(|(id, pin)| base.extensions.get(*id) != Some(*pin))
+        .map(|(id, pin)| config::format_spec(id, pin.as_deref()))
+        .collect();
+    let ext_excl: Vec<String> = base
+        .extensions
+        .keys()
+        .filter(|id| !extensions.contains_key(*id))
+        .cloned()
+        .collect();
 
     if name == profiles::DEFAULT_PROFILE {
         let d = &mut config.default;
@@ -339,7 +380,7 @@ fn capture_profile(
         name.to_owned(),
         ProfileSnapshot {
             settings: settings.clone(),
-            extensions: extensions.clone(),
+            extensions: extensions.keys().cloned().collect(),
         },
     );
 }
@@ -460,7 +501,7 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
             name.clone(),
             ProfileSnapshot {
                 settings: final_state.settings,
-                extensions: final_state.extensions,
+                extensions: final_state.extensions.into_keys().collect(),
             },
         );
     }
@@ -528,7 +569,7 @@ fn push_destructive_summary(
         // The Default profile's extension list is the shared pool and is never
         // pruned, so its extras are not destructive.
         if !profile.is_default() && !effective_inherits(want, profile, "extensions") {
-            let removed = actual.extensions.difference(&want.extensions).count();
+            let removed = ext_extra(&want.extensions, &actual.extensions).len();
             if removed > 0 {
                 lines.push(format!("{name}: uninstall {removed} extension(s)"));
             }
@@ -652,7 +693,7 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
         }
 
         // Apply to config + snapshot.
-        all_extensions.extend(exts.iter().cloned());
+        all_extensions.extend(exts.keys().cloned());
         capture_profile(config, snapshot, &name, &profile, &settings, &exts);
     }
     vendor_step(ctx, &catalog, &all_extensions);
@@ -678,9 +719,10 @@ fn apply_sync_tombstones(
             continue; // already absent
         };
         let actual = read_actual(ctx.editor, profile)?;
+        let actual_ids: BTreeSet<String> = actual.extensions.keys().cloned().collect();
         let changed = snapshot.profile(name).map_or(
             !actual.settings.is_empty() || !actual.extensions.is_empty(),
-            |base| base.settings != actual.settings || base.extensions != actual.extensions,
+            |base| base.settings != actual.settings || base.extensions != actual_ids,
         );
         if changed
             && resolve_conflict(
@@ -749,26 +791,28 @@ fn reconcile_settings(
     Ok(result)
 }
 
-/// Reconcile an extension set. Presence can change on at most one side relative
-/// to the base, so these never truly conflict when a base exists.
+/// Reconcile extension membership using the snapshot as ancestor (presence is
+/// 3-way merged per id), then derive each surviving id's pin: an explicit repo
+/// pin wins; otherwise a frozen editor install is preserved (`Some(version)`),
+/// and a floating install stays floating (`None`). Returns id -> pin.
 fn reconcile_extensions(
     ctx: &Ctx<'_>,
     profile: &str,
     base: &ProfileSnapshot,
-    repo: &BTreeSet<String>,
-    editor: &BTreeSet<String>,
-) -> Result<BTreeSet<String>> {
+    repo: &BTreeMap<String, Option<String>>,
+    editor: &Membership,
+) -> Result<BTreeMap<String, Option<String>>> {
     let mut ids: BTreeSet<&String> = BTreeSet::new();
     ids.extend(base.extensions.iter());
-    ids.extend(repo.iter());
-    ids.extend(editor.iter());
+    ids.extend(repo.keys());
+    ids.extend(editor.keys());
 
     let present = Value::Bool(true);
-    let mut result = BTreeSet::new();
+    let mut result = BTreeMap::new();
     for id in ids {
         let b = base.extensions.contains(id).then(|| present.clone());
-        let r = repo.contains(id).then(|| present.clone());
-        let e = editor.contains(id).then(|| present.clone());
+        let r = repo.contains_key(id).then(|| present.clone());
+        let e = editor.contains_key(id).then(|| present.clone());
         let decision = classify(b.as_ref(), r.as_ref(), e.as_ref());
         let chosen = resolve_decision(
             ctx,
@@ -778,7 +822,13 @@ fn reconcile_extensions(
             e.as_ref(),
         )?;
         if chosen.is_some() {
-            result.insert(id.clone());
+            let pin = repo.get(id).and_then(Clone::clone).or_else(|| {
+                editor
+                    .get(id)
+                    .filter(|state| state.pinned)
+                    .map(|state| state.version.clone())
+            });
+            result.insert(id.clone(), pin);
         }
     }
     Ok(result)
@@ -893,14 +943,15 @@ fn apply_settings(
 fn apply_extensions(
     ctx: &Ctx<'_>,
     profile: &Profile,
-    desired: &BTreeSet<String>,
-    current: &BTreeSet<String>,
+    desired: &BTreeMap<String, Option<String>>,
+    current: &Membership,
     catalog: &Catalog,
     prune: bool,
 ) -> usize {
     let mut failures = 0_usize;
-    for id in desired.difference(current) {
-        if let Err(err) = install_ext(ctx, profile, id, catalog) {
+    for id in ext_unsatisfied(desired, current) {
+        let pin = desired.get(&id).and_then(Clone::clone);
+        if let Err(err) = install_ext(ctx, profile, &id, pin.as_deref(), catalog) {
             ui::warn(format!(
                 "could not install {id} into {}: {err:#}",
                 profile.name
@@ -908,9 +959,9 @@ fn apply_extensions(
             failures = failures.saturating_add(1);
         }
     }
-    for id in current.difference(desired) {
+    for id in ext_extra(desired, current) {
         if prune {
-            if let Err(err) = uninstall_ext(ctx, profile, id) {
+            if let Err(err) = uninstall_ext(ctx, profile, &id) {
                 ui::warn(format!(
                     "could not remove {id} from {}: {err:#}",
                     profile.name
@@ -927,15 +978,23 @@ fn apply_extensions(
     failures
 }
 
-fn install_ext(ctx: &Ctx<'_>, profile: &Profile, id: &str, catalog: &Catalog) -> Result<()> {
+fn install_ext(
+    ctx: &Ctx<'_>,
+    profile: &Profile,
+    id: &str,
+    pin: Option<&str>,
+    catalog: &Catalog,
+) -> Result<()> {
     if ctx.dry_run {
-        ui::bullet(format!("would install {id} into {}", profile.name));
+        let spec = pin.map_or_else(|| id.to_owned(), |v| format!("{id}@{v}"));
+        ui::bullet(format!("would install {spec} into {}", profile.name));
         return Ok(());
     }
     let method = extension::add_member(
         ctx.editor,
         profile,
         id,
+        pin,
         catalog,
         &ctx.vendor_dir,
         &ctx.backup_dir,
@@ -1236,7 +1295,9 @@ mod tests {
         let settings = crate::jsonc::read_object(&fixture.rust_settings_path())?;
         assert_eq!(settings.get("editor.tabSize"), Some(&json!(2)));
         assert_eq!(
-            extension::read_membership_file(&fixture.rust_extensions_path())?,
+            extension::read_membership_file(&fixture.rust_extensions_path())?
+                .into_keys()
+                .collect::<BTreeSet<_>>(),
             BTreeSet::from(["pub.one".to_owned()])
         );
         let rust = snapshot.profile("Rust");
@@ -1247,6 +1308,63 @@ mod tests {
         assert_eq!(
             rust.map(|profile| profile.extensions.clone()),
             Some(BTreeSet::from(["pub.one".to_owned()]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn push_pins_extension_to_requested_version_and_freezes_it() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write_pool_extensions(&["Pub.One"])?; // pool has 1.0.0
+        let config = rust_config(&[], &["pub.one@1.0.0"]);
+        let mut snapshot = Snapshot::default();
+
+        push(&fixture.ctx(), &config, &mut snapshot)?;
+
+        let membership = extension::read_membership_file(&fixture.rust_extensions_path())?;
+        let state = membership.get("pub.one");
+        assert_eq!(state.map(|s| s.version.as_str()), Some("1.0.0"));
+        assert_eq!(
+            state.map(|s| s.pinned),
+            Some(true),
+            "a pinned install must be frozen"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pull_captures_pin_for_frozen_install_and_bare_for_floating() -> Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.write_pool_extensions(&["Pub.Pinned", "Pub.Floating"])?;
+        // One frozen at 2.3.4, one floating.
+        write_json(
+            &fixture.rust_extensions_path(),
+            &json!([
+                {
+                    "identifier": { "id": "Pub.Pinned" },
+                    "version": "2.3.4",
+                    "relativeLocation": "pub.pinned-2.3.4",
+                    "metadata": { "source": "gallery", "pinned": true }
+                },
+                {
+                    "identifier": { "id": "Pub.Floating" },
+                    "version": "1.0.0",
+                    "relativeLocation": "pub.floating-1.0.0",
+                    "metadata": { "source": "gallery" }
+                }
+            ]),
+        )?;
+        let mut config = Config::default();
+        let mut snapshot = Snapshot::default();
+
+        pull(&fixture.ctx(), &mut config, &mut snapshot)?;
+
+        let rust = config.profiles.get("Rust");
+        let mut exts = rust.map(|r| r.extensions.clone()).unwrap_or_default();
+        exts.sort();
+        assert_eq!(
+            exts,
+            vec!["pub.floating".to_owned(), "pub.pinned@2.3.4".to_owned()]
         );
         Ok(())
     }
@@ -1330,7 +1448,9 @@ mod tests {
         assert_eq!(settings.get("repo.added"), Some(&json!(true)));
         assert_eq!(settings.get("repo.removed"), None);
         assert_eq!(
-            extension::read_membership_file(&fixture.rust_extensions_path())?,
+            extension::read_membership_file(&fixture.rust_extensions_path())?
+                .into_keys()
+                .collect::<BTreeSet<_>>(),
             BTreeSet::from(["pub.repo".to_owned()])
         );
 
