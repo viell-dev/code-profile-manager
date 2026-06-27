@@ -146,10 +146,14 @@ impl ProfileConfig {
 }
 
 /// Effective desired state for one profile after layering.
+///
+/// `extensions` maps a normalized extension id to its optional **version pin**:
+/// `Some(version)` means "install and hold exactly this version" (round-trips to
+/// the editor's `metadata.pinned`); `None` means floating (latest compatible).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Resolved {
     pub settings: BTreeMap<String, Value>,
-    pub extensions: BTreeSet<String>,
+    pub extensions: BTreeMap<String, Option<String>>,
     pub icon: Option<String>,
     pub use_default: BTreeMap<String, bool>,
 }
@@ -253,26 +257,33 @@ impl Config {
         use_default: &BTreeMap<String, bool>,
     ) -> Resolved {
         let mut settings = self.global.settings.clone();
-        let mut extensions: BTreeSet<String> = self
-            .global
-            .extensions
-            .iter()
-            .map(|id| normalize_id(id))
-            .collect();
+        // Later layers win per id (global -> groups -> profile), so a profile pin
+        // overrides a group/global one and a bare id clears an inherited pin.
+        let mut extensions: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for spec in &self.global.extensions {
+            let (id, pin) = parse_spec(spec);
+            extensions.insert(id, pin);
+        }
 
         for group_name in groups {
             if let Some(group) = self.groups.get(group_name) {
                 for (key, value) in &group.settings {
                     settings.insert(key.clone(), value.clone());
                 }
-                extensions.extend(group.extensions.iter().map(|id| normalize_id(id)));
+                for spec in &group.extensions {
+                    let (id, pin) = parse_spec(spec);
+                    extensions.insert(id, pin);
+                }
             }
         }
 
         for (key, value) in own_settings {
             settings.insert(key.clone(), value.clone());
         }
-        extensions.extend(own_extensions.iter().map(|id| normalize_id(id)));
+        for spec in own_extensions {
+            let (id, pin) = parse_spec(spec);
+            extensions.insert(id, pin);
+        }
         for excluded in excludes {
             extensions.remove(&normalize_id(excluded));
         }
@@ -301,12 +312,12 @@ impl Config {
         let common_settings = modal_common_settings(&resolved, &self.default.settings);
         let common_extensions = intersect_extensions(&resolved);
 
-        // Count only what is newly added to global.
-        let existing_global: BTreeSet<String> = self
+        // Count only what is newly added to global (a differing pin counts as new).
+        let existing_global: BTreeMap<String, Option<String>> = self
             .global
             .extensions
             .iter()
-            .map(|id| normalize_id(id))
+            .map(|spec| parse_spec(spec))
             .collect();
         let report = Consolidation {
             settings: common_settings
@@ -315,7 +326,7 @@ impl Config {
                 .count(),
             extensions: common_extensions
                 .iter()
-                .filter(|id| !existing_global.contains(*id))
+                .filter(|(id, pin)| existing_global.get(*id) != Some(*pin))
                 .count(),
         };
 
@@ -323,8 +334,15 @@ impl Config {
             self.global.settings.insert(key.clone(), value.clone());
         }
         let mut global_extensions = existing_global;
-        global_extensions.extend(common_extensions.iter().cloned());
-        self.global.extensions = global_extensions.into_iter().collect();
+        global_extensions.extend(
+            common_extensions
+                .iter()
+                .map(|(id, pin)| (id.clone(), pin.clone())),
+        );
+        self.global.extensions = global_extensions
+            .iter()
+            .map(|(id, pin)| format_spec(id, pin.as_deref()))
+            .collect();
 
         // Re-express each profile as a minimal delta over the new global+groups.
         for (name, effective) in &resolved {
@@ -337,14 +355,18 @@ impl Config {
                 .filter(|(key, value)| base.settings.get(*key) != Some(*value))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
+            // An extension is a profile-level delta when base doesn't already
+            // provide it with the same pin; excludes drop a base id absent here.
             let extensions = effective
                 .extensions
-                .difference(&base.extensions)
-                .cloned()
+                .iter()
+                .filter(|(id, pin)| base.extensions.get(*id) != Some(*pin))
+                .map(|(id, pin)| format_spec(id, pin.as_deref()))
                 .collect();
             let exclude = base
                 .extensions
-                .difference(&effective.extensions)
+                .keys()
+                .filter(|id| !effective.extensions.contains_key(*id))
                 .cloned()
                 .collect();
             if name == DEFAULT_PROFILE {
@@ -379,22 +401,47 @@ pub struct Consolidation {
     pub extensions: usize,
 }
 
-/// Normalize an extension identifier for set membership: drop any `@version`
-/// pin and lowercase (`publisher.name` is case-insensitive).
-pub fn normalize_id(spec: &str) -> String {
-    let id = spec.split('@').next().unwrap_or(spec);
-    id.trim().to_lowercase()
+/// Parse an extension spec `publisher.name[@version]` into a normalized id and an
+/// optional exact-version pin. The id is lowercased (`publisher.name` is
+/// case-insensitive); the version is taken verbatim (trimmed). An empty version
+/// (`id@`) is treated as no pin.
+pub fn parse_spec(spec: &str) -> (String, Option<String>) {
+    match spec.split_once('@') {
+        Some((id, version)) => {
+            let version = version.trim();
+            (
+                id.trim().to_lowercase(),
+                (!version.is_empty()).then(|| version.to_owned()),
+            )
+        }
+        None => (spec.trim().to_lowercase(), None),
+    }
 }
 
-/// Extensions present in every resolved profile (intersection).
-fn intersect_extensions(resolved: &BTreeMap<String, Resolved>) -> BTreeSet<String> {
+/// Render an id + optional pin back into a spec (`id` or `id@version`).
+pub fn format_spec(id: &str, pin: Option<&str>) -> String {
+    match pin {
+        Some(version) => format!("{id}@{version}"),
+        None => id.to_owned(),
+    }
+}
+
+/// Normalize an extension identifier for membership: drop any `@version` pin and
+/// lowercase (`publisher.name` is case-insensitive).
+pub fn normalize_id(spec: &str) -> String {
+    parse_spec(spec).0
+}
+
+/// Extensions present in every resolved profile with the **same pin** (a differing
+/// pin is profile-specific and must not be hoisted).
+fn intersect_extensions(resolved: &BTreeMap<String, Resolved>) -> BTreeMap<String, Option<String>> {
     let mut profiles = resolved.values();
     let Some(first) = profiles.next() else {
-        return BTreeSet::new();
+        return BTreeMap::new();
     };
     let mut common = first.extensions.clone();
     for profile in profiles {
-        common.retain(|id| profile.extensions.contains(id));
+        common.retain(|id, pin| profile.extensions.get(id) == Some(pin));
     }
     common
 }
@@ -531,11 +578,42 @@ mod tests {
             Some(&json!(2)),
             "group setting present"
         );
-        assert!(p.extensions.contains("pub.group"));
-        assert!(p.extensions.contains("pub.profile"));
+        assert!(p.extensions.contains_key("pub.group"));
+        assert!(p.extensions.contains_key("pub.profile"));
         assert!(
-            !p.extensions.contains("pub.global"),
+            !p.extensions.contains_key("pub.global"),
             "exclude removed a global extension"
+        );
+    }
+
+    #[test]
+    fn parse_and_format_spec_roundtrip_pins() {
+        assert_eq!(
+            parse_spec("Pub.Name@1.2.3"),
+            ("pub.name".to_owned(), Some("1.2.3".to_owned()))
+        );
+        assert_eq!(parse_spec("  Pub.Name  "), ("pub.name".to_owned(), None));
+        assert_eq!(parse_spec("pub.name@"), ("pub.name".to_owned(), None));
+        assert_eq!(format_spec("pub.name", Some("1.2.3")), "pub.name@1.2.3");
+        assert_eq!(format_spec("pub.name", None), "pub.name");
+    }
+
+    #[test]
+    fn resolve_profile_pin_overrides_global_floating() {
+        let mut config = Config::default();
+        config.global.extensions.push("pub.x".to_owned());
+        config.profiles.insert(
+            "P".to_owned(),
+            ProfileConfig {
+                extensions: vec!["pub.x@2.0.0".to_owned()],
+                ..ProfileConfig::default()
+            },
+        );
+        let resolved = config.resolve();
+        assert_eq!(
+            resolved.get("P").unwrap().extensions.get("pub.x"),
+            Some(&Some("2.0.0".to_owned())),
+            "profile pin overrides global floating"
         );
     }
 

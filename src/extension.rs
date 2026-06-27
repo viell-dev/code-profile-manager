@@ -24,6 +24,18 @@ use crate::safety;
 /// Full pool catalog entries, keyed by normalized extension id.
 pub type Catalog = BTreeMap<String, Value>;
 
+/// An installed extension as recorded in a profile's `extensions.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledExt {
+    /// The installed version (e.g. `1.31.7`).
+    pub version: String,
+    /// Whether the editor has the version frozen (`metadata.pinned`).
+    pub pinned: bool,
+}
+
+/// Per-profile membership: normalized id -> installed state.
+pub type Membership = BTreeMap<String, InstalledExt>;
+
 /// How an extension was added to a profile.
 pub enum AddMethod {
     /// Copied from the shared pool catalog (already installed on disk).
@@ -44,14 +56,23 @@ struct RawIdentifier {
     id: String,
 }
 
-/// Read the set of installed extension IDs (normalized) for a profile.
-pub fn read_membership(editor: &Editor, profile: &Profile) -> Result<BTreeSet<String>> {
+/// Read the installed extensions (normalized id -> state) for a profile.
+pub fn read_membership(editor: &Editor, profile: &Profile) -> Result<Membership> {
     read_membership_file(&profile.extensions_path(editor))
 }
 
-/// Read normalized extension IDs from an `extensions.json` file.
-pub fn read_membership_file(path: &Path) -> Result<BTreeSet<String>> {
-    Ok(read_entries(path)?.iter().filter_map(entry_id).collect())
+/// Read installed extensions from an `extensions.json` file.
+pub fn read_membership_file(path: &Path) -> Result<Membership> {
+    let mut out = Membership::new();
+    for entry in read_entries(path)? {
+        if let Some(id) = entry_id(&entry) {
+            out.entry(id).or_insert_with(|| InstalledExt {
+                version: entry_version(&entry),
+                pinned: entry_pinned(&entry),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// The shared extensions pool catalog (full entries with metadata/location).
@@ -66,28 +87,38 @@ pub fn pool_catalog(editor: &Editor) -> Result<Catalog> {
     Ok(catalog)
 }
 
-/// Ensure `id` is a member of `profile`. Tries, in order: the shared pool (if
-/// already installed), a vendored copy in the repo, then the editor CLI.
+/// Ensure `id` is a member of `profile` at the desired version. `pin` requests an
+/// exact version (held via `metadata.pinned`); `None` floats to whatever a source
+/// provides. Tries, in order: the shared pool (if it already has the right
+/// version), a vendored copy in the repo, then the editor CLI.
 pub fn add_member(
     editor: &Editor,
     profile: &Profile,
     id: &str,
+    pin: Option<&str>,
     catalog: &Catalog,
     vendor_dir: &Path,
     backup_dir: &Path,
 ) -> Result<AddMethod> {
-    if add_from_catalog(editor, profile, id, catalog, backup_dir)? {
+    if add_from_catalog(editor, profile, id, pin, catalog, backup_dir)? {
         return Ok(AddMethod::Pool);
     }
-    if add_from_vendor(editor, profile, id, vendor_dir, backup_dir)? {
+    if add_from_vendor(editor, profile, id, pin, vendor_dir, backup_dir)? {
         return Ok(AddMethod::Vendor);
     }
+    // The editor CLI accepts `id@version` to fetch a specific build.
+    let spec = pin.map_or_else(|| id.to_owned(), |version| format!("{id}@{version}"));
     run_cli(
         editor,
         profile.cli_profile(),
-        &["--install-extension", id, "--force"],
+        &["--install-extension", &spec, "--force"],
     )
-    .with_context(|| format!("installing extension {id}"))?;
+    .with_context(|| format!("installing extension {spec}"))?;
+    // A pinned install must be frozen so the editor won't auto-update it; the CLI
+    // does not always set this, so assert it on the freshly written entry.
+    if pin.is_some() {
+        set_membership_pinned(editor, profile, id, backup_dir)?;
+    }
     Ok(AddMethod::Cli)
 }
 
@@ -156,18 +187,35 @@ fn add_from_catalog(
     editor: &Editor,
     profile: &Profile,
     id: &str,
+    pin: Option<&str>,
     catalog: &Catalog,
     backup_dir: &Path,
 ) -> Result<bool> {
     let Some(entry) = catalog.get(id) else {
         return Ok(false);
     };
+    // The pool holds a single installed version; it can only satisfy a pin that
+    // matches it, otherwise fall through to a vendored copy or the CLI.
+    if let Some(version) = pin
+        && entry_version(entry) != version
+    {
+        return Ok(false);
+    }
     let path = profile.extensions_path(editor);
     let mut entries = read_entries(&path)?;
-    if entries.iter().any(|e| entry_id(e).as_deref() == Some(id)) {
-        return Ok(true);
+    if let Some(existing) = entries.iter().find(|e| entry_id(e).as_deref() == Some(id)) {
+        let satisfied = pin.is_none() || entry_pinned(existing);
+        if satisfied {
+            return Ok(true);
+        }
     }
-    entries.push(entry.clone());
+    let mut entry = entry.clone();
+    if pin.is_some() {
+        set_pinned(&mut entry, true);
+    }
+    // Replace any stale entry for this id (a version-drift or pin reinstall).
+    entries.retain(|e| entry_id(e).as_deref() != Some(id));
+    entries.push(entry);
     write_entries(&path, &entries, backup_dir)?;
     Ok(true)
 }
@@ -179,12 +227,19 @@ fn add_from_vendor(
     editor: &Editor,
     profile: &Profile,
     id: &str,
+    pin: Option<&str>,
     vendor_dir: &Path,
     backup_dir: &Path,
 ) -> Result<bool> {
     let Some((mut entry, rel)) = find_vendored(vendor_dir, id)? else {
         return Ok(false);
     };
+    // A pin is only satisfiable by a vendored copy of that exact version.
+    if let Some(version) = pin
+        && entry_version(&entry) != version
+    {
+        return Ok(false);
+    }
     let vendored = vendor_dir.join(&rel);
     if !vendored.is_dir() {
         return Ok(false);
@@ -204,12 +259,18 @@ fn add_from_vendor(
             }),
         );
     }
+    if pin.is_some() {
+        set_pinned(&mut entry, true);
+    }
 
     let path = profile.extensions_path(editor);
     let mut entries = read_entries(&path)?;
-    if entries.iter().any(|e| entry_id(e).as_deref() == Some(id)) {
+    if let Some(existing) = entries.iter().find(|e| entry_id(e).as_deref() == Some(id))
+        && (pin.is_none() || entry_pinned(existing))
+    {
         return Ok(true);
     }
+    entries.retain(|e| entry_id(e).as_deref() != Some(id));
     entries.push(entry);
     write_entries(&path, &entries, backup_dir)?;
     Ok(true)
@@ -267,6 +328,59 @@ fn entry_source(entry: &Value) -> Option<String> {
         .get("source")?
         .as_str()
         .map(str::to_owned)
+}
+
+/// The installed version of an entry (empty when absent).
+fn entry_version(entry: &Value) -> String {
+    entry
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Whether an entry is frozen (`metadata.pinned == true`).
+fn entry_pinned(entry: &Value) -> bool {
+    entry
+        .get("metadata")
+        .and_then(|m| m.get("pinned"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Set `metadata.pinned` on an entry, creating `metadata` if needed.
+fn set_pinned(entry: &mut Value, pinned: bool) {
+    if let Value::Object(map) = entry {
+        let metadata = map
+            .entry("metadata".to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(metadata) = metadata {
+            metadata.insert("pinned".to_owned(), Value::Bool(pinned));
+        }
+    }
+}
+
+/// Ensure the profile's membership entry for `id` is frozen (`metadata.pinned`),
+/// rewriting the file only when it isn't already.
+fn set_membership_pinned(
+    editor: &Editor,
+    profile: &Profile,
+    id: &str,
+    backup_dir: &Path,
+) -> Result<()> {
+    let path = profile.extensions_path(editor);
+    let mut entries = read_entries(&path)?;
+    let mut changed = false;
+    for entry in &mut entries {
+        if entry_id(entry).as_deref() == Some(id) && !entry_pinned(entry) {
+            set_pinned(entry, true);
+            changed = true;
+        }
+    }
+    if changed {
+        write_entries(&path, &entries, backup_dir)?;
+    }
+    Ok(())
 }
 
 fn relative_location(entry: &Value) -> Option<String> {

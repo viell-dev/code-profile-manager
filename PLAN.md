@@ -690,6 +690,22 @@ concepts — **exact-version install** (`id@1.2.3`) and **freeze / no-auto-updat
   set the pinned flag), and the snapshot (record resolved version).
 - **Sequencing (DECIDED):** one branch — vsix vendoring + version pinning together.
 
+**Implementation progress** (branch `vsix-vendoring-and-version-pinning`):
+- [x] Stage 1 — version-aware membership model: `config::parse_spec`/`format_spec`,
+  `Resolved.extensions` → `id → Option<version>` (pin precedence profile > group > global),
+  `extension::InstalledExt`/`Membership` carry installed version + `pinned`, pin install sets
+  `metadata.pinned` (pool/vendor/CLI tiers) with version-drift/freeze reinstall on push, pull
+  writes `id@version` for frozen installs and bare ids otherwise. **Deviation:** the snapshot
+  stays id-only (`BTreeSet`) — membership is presence-based per id, so a version change never
+  churns the 3-way merge and recording versions would only force a format migration for no
+  behavioral gain; version drift is handled at install (push/sync) and capture (pull).
+  Tests added for pinned push (freezes at version) and pull pin round-trip.
+- [ ] Stage 2 — vsix vendoring: `zip` dep, `vendor/{vsix,extensions}` split, manifest-driven
+  discovery (id+version+targetPlatform), restore tiering (pool → `extension_sources` →
+  `vendor/vsix` → folder fallback → CLI), folder pruning on exact match, engine pre-flight
+  warning, two-bucket end-of-run report.
+- [ ] Stage 3 — `[extension_sources]` config + schema + `docs/config.md`, drift-guard test.
+
 ---
 
 ## 5. Settings writes
