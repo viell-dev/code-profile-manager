@@ -50,6 +50,8 @@ pub type Membership = BTreeMap<String, InstalledExt>;
 pub enum AddMethod {
     /// Copied from the shared pool catalog (already installed on disk).
     Pool,
+    /// Installed from a live external `.vsix` (an `[extension_sources]` path).
+    External,
     /// Installed from a vendored `.vsix` package.
     Vsix,
     /// Restored from an unpacked vendored folder (fallback).
@@ -103,17 +105,29 @@ pub fn pool_catalog(editor: &Editor) -> Result<Catalog> {
 /// exact version (held via `metadata.pinned`); `None` floats to whatever a source
 /// provides. Tries, in order: the shared pool (if it already has the right
 /// version), a vendored copy in the repo, then the editor CLI.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an install names its editor/profile/id, the desired pin, and each candidate source (external, catalog, vendor) plus the backup dir"
+)]
 pub fn add_member(
     editor: &Editor,
     profile: &Profile,
     id: &str,
     pin: Option<&str>,
+    external: Option<&Path>,
     catalog: &Catalog,
     vendor_dir: &Path,
     backup_dir: &Path,
 ) -> Result<AddMethod> {
     if add_from_catalog(editor, profile, id, pin, catalog, backup_dir)? {
         return Ok(AddMethod::Pool);
+    }
+    // A configured [extension_sources] path is a live external reference: install
+    // it in place, never copy it into the vendor store.
+    if let Some(external) = external
+        && add_from_external(editor, profile, id, pin, external, backup_dir)?
+    {
+        return Ok(AddMethod::External);
     }
     if add_from_vsix(editor, profile, id, pin, &vsix_dir(vendor_dir), backup_dir)? {
         return Ok(AddMethod::Vsix);
@@ -290,6 +304,42 @@ fn add_from_catalog(
     entries.retain(|e| entry_id(e).as_deref() != Some(id));
     entries.push(entry);
     write_entries(&path, &entries, backup_dir)?;
+    Ok(true)
+}
+
+/// Install `id` from a live external `.vsix` (an `[extension_sources]` path). The file is
+/// installed in place (never copied into the vendor store) and frozen when pinned.
+/// Returns `false` when the file is missing or its version doesn't match the pin
+/// (so the caller falls through to the vendor store / CLI).
+fn add_from_external(
+    editor: &Editor,
+    profile: &Profile,
+    id: &str,
+    pin: Option<&str>,
+    external: &Path,
+    backup_dir: &Path,
+) -> Result<bool> {
+    if !external.is_file() {
+        return Ok(false);
+    }
+    if let Some(version) = pin
+        && vsix::read_info(external).is_ok_and(|info| info.version != version)
+    {
+        return Ok(false);
+    }
+    run_cli(
+        editor,
+        profile.cli_profile(),
+        &[
+            "--install-extension",
+            &external.to_string_lossy(),
+            "--force",
+        ],
+    )
+    .with_context(|| format!("installing {id} from {}", external.display()))?;
+    if pin.is_some() {
+        set_membership_pinned(editor, profile, id, backup_dir)?;
+    }
     Ok(true)
 }
 

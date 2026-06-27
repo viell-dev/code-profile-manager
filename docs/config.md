@@ -202,17 +202,64 @@ so a setting explicitly set to `null` is not managed.
 ## Extensions
 
 Extension IDs take the form `publisher.name`, optionally pinned as
-`publisher.name@version`. Pins are parsed but **not** enforced for membership in v1
-(newest compatible is acceptable; the resolved version is recorded in the snapshot so it
-doesn't churn). The ID must match:
+`publisher.name@version`. The ID must match:
 
 ```text
 ^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*(@.+)?$
 ```
 
-Local **VSIX-source** extensions need no special config field: they are vendored
-automatically into the app home's `vendor/extensions/` on pull/sync and restored on push,
-so the config stays portable across machines without a marketplace.
+### Version pins
+
+- **`publisher.name`** (bare) — floating: install the latest compatible build. The
+  resolved version is recorded in the snapshot so it doesn't churn between runs.
+- **`publisher.name@version`** — pinned: install and **hold** that exact version, frozen via
+  the editor's `metadata.pinned` so the editor won't auto-update it. On push, an extension
+  already installed at a different version (or not frozen) is reinstalled to honor the pin.
+
+Pins round-trip: `pull`/`sync` write `publisher.name@version` for a frozen install and a
+bare id for a floating one. A pin in a more specific layer wins (`[profiles.*]` over
+`[groups.*]` over `[global]`); a bare id in a more specific layer clears an inherited pin.
+Within one profile an extension resolves to a single version (the editor loads one build per
+id per profile); keeping multiple versions side by side is a property of the vendor store
+across profiles, not within one.
+
+### Vendoring (`.vsix`)
+
+Extensions not on a marketplace (or installed from a local `.vsix`) are made portable so the
+config works on other machines without a marketplace. The app home's `vendor/` directory has
+two parts:
+
+- **`vendor/vsix/`** — `.vsix` packages. The preferred, portable source: drop a `.vsix` here
+  and it is auto-discovered by its manifest (id + version + `targetPlatform`); no config
+  entry is needed. Multiple versions/platforms of the same id can coexist.
+- **`vendor/extensions/`** — unpacked-folder fallback. Used only when no `.vsix` is available
+  (e.g. captured from an already-installed extension on `pull`).
+
+On `pull`/`sync`, a local extension already backed by a matching `.vsix` is left to that
+`.vsix` and any stale fallback folder is pruned; otherwise its installed folder is vendored
+as a fallback and you are nudged (never forced) to add a `.vsix` to slim the repo. When
+installing, sources are tried in order: shared pool → `[extension_sources]` → `vendor/vsix/`
+→ `vendor/extensions/` → editor CLI (Open VSX).
+
+## `[extension_sources]`
+
+A top-level map of extension id → path to a `.vsix` file, for **non-marketplace** sources
+kept **outside** the repo:
+
+```toml
+[extension_sources]
+"corp.internal-tool" = "/mnt/corp/extensions/internal-tool.vsix"
+```
+
+This is a **live external reference**: the path is read on each run and the `.vsix` is
+installed in place — it is **never** copied into `vendor/`. That makes it ideal for a shared
+corporate drive, but it also means a config relying on `[extension_sources]` is not
+self-contained: on a machine without that path, the install falls through to the next source
+(`vendor/vsix/` → CLI) and the miss is reported rather than failing the run. For a portable
+repo, drop the `.vsix` in `vendor/vsix/` instead (no entry needed here).
+
+Keys are bare extension ids (no `@version`; the `.vsix` carries the version) and are matched
+case-insensitively. Values must end in `.vsix`.
 
 ## `use_default`
 
@@ -239,8 +286,9 @@ The effective desired state for a profile is computed deterministically:
 - **settings** — `[global].settings` → each included `[groups.*].settings` (in listed
   order) → the profile's / `[default]`'s `settings`. Later wins, per **top-level key**
   (the value is replaced wholesale; recursive object deep-merge is future work).
-- **extensions** — `union(global, groups…, profile)` minus `exclude_extensions`. A set of
-  IDs; versions are ignored for membership.
+- **extensions** — `union(global, groups…, profile)` minus `exclude_extensions`, keyed by
+  id. Each id carries an optional version pin; a pin in a more specific layer wins and a bare
+  id clears an inherited pin (`exclude_extensions` matches by id regardless of pin).
 - **use_default** — taken from the profile itself, not inherited from global/groups.
 - A profile that inherits a resource (`use_default.<resource> = true`) ignores the
   resolved settings/extensions for that resource.

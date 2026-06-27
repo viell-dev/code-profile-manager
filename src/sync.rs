@@ -488,6 +488,7 @@ pub fn push(ctx: &Ctx<'_>, config: &Config, snapshot: &mut Snapshot) -> Result<(
             // Never prune the Default profile's list (it is the shared pool).
             failures = failures.saturating_add(apply_extensions(
                 ctx,
+                config,
                 &profile,
                 &want.extensions,
                 &current,
@@ -684,6 +685,7 @@ pub fn sync(ctx: &Ctx<'_>, config: &mut Config, snapshot: &mut Snapshot) -> Resu
         if !effective_inherits(&want, &profile, "extensions") {
             failures = failures.saturating_add(apply_extensions(
                 ctx,
+                config,
                 &profile,
                 &exts,
                 &actual.extensions,
@@ -942,6 +944,7 @@ fn apply_settings(
 /// reported and counted, never aborting the run.
 fn apply_extensions(
     ctx: &Ctx<'_>,
+    config: &Config,
     profile: &Profile,
     desired: &BTreeMap<String, Option<String>>,
     current: &Membership,
@@ -951,7 +954,7 @@ fn apply_extensions(
     let mut failures = 0_usize;
     for id in ext_unsatisfied(desired, current) {
         let pin = desired.get(&id).and_then(Clone::clone);
-        if let Err(err) = install_ext(ctx, profile, &id, pin.as_deref(), catalog) {
+        if let Err(err) = install_ext(ctx, config, profile, &id, pin.as_deref(), catalog) {
             ui::warn(format!(
                 "could not install {id} into {}: {err:#}",
                 profile.name
@@ -980,6 +983,7 @@ fn apply_extensions(
 
 fn install_ext(
     ctx: &Ctx<'_>,
+    config: &Config,
     profile: &Profile,
     id: &str,
     pin: Option<&str>,
@@ -995,12 +999,14 @@ fn install_ext(
         profile,
         id,
         pin,
+        config.extension_source(id),
         catalog,
         &ctx.vendor_dir,
         &ctx.backup_dir,
     )?;
     let how = match method {
         extension::AddMethod::Pool => "from pool",
+        extension::AddMethod::External => "from external .vsix",
         extension::AddMethod::Vsix => "from vendored .vsix",
         extension::AddMethod::Vendor => "from vendored folder",
         extension::AddMethod::Cli => "via CLI",
