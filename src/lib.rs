@@ -9,6 +9,7 @@ mod safety;
 mod snapshot;
 mod sync;
 mod ui;
+mod vsix;
 
 use clap::Parser;
 

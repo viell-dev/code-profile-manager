@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +19,17 @@ use serde_json::Value;
 use crate::config::normalize_id;
 use crate::editor::Editor;
 use crate::editor::profiles::Profile;
-use crate::safety;
+use crate::{safety, vsix};
+
+/// Vendored `.vsix` packages (preferred, portable source) under `vendor/`.
+fn vsix_dir(vendor_dir: &Path) -> PathBuf {
+    vendor_dir.join("vsix")
+}
+
+/// Unpacked vendored folders (fallback source) under `vendor/`.
+fn folder_dir(vendor_dir: &Path) -> PathBuf {
+    vendor_dir.join("extensions")
+}
 
 /// Full pool catalog entries, keyed by normalized extension id.
 pub type Catalog = BTreeMap<String, Value>;
@@ -40,7 +50,9 @@ pub type Membership = BTreeMap<String, InstalledExt>;
 pub enum AddMethod {
     /// Copied from the shared pool catalog (already installed on disk).
     Pool,
-    /// Restored from a vendored copy in the repo.
+    /// Installed from a vendored `.vsix` package.
+    Vsix,
+    /// Restored from an unpacked vendored folder (fallback).
     Vendor,
     /// Fetched and installed via the editor CLI.
     Cli,
@@ -103,7 +115,17 @@ pub fn add_member(
     if add_from_catalog(editor, profile, id, pin, catalog, backup_dir)? {
         return Ok(AddMethod::Pool);
     }
-    if add_from_vendor(editor, profile, id, pin, vendor_dir, backup_dir)? {
+    if add_from_vsix(editor, profile, id, pin, &vsix_dir(vendor_dir), backup_dir)? {
+        return Ok(AddMethod::Vsix);
+    }
+    if add_from_vendor(
+        editor,
+        profile,
+        id,
+        pin,
+        &folder_dir(vendor_dir),
+        backup_dir,
+    )? {
         return Ok(AddMethod::Vendor);
     }
     // The editor CLI accepts `id@version` to fetch a specific build.
@@ -122,17 +144,36 @@ pub fn add_member(
     Ok(AddMethod::Cli)
 }
 
-/// Copy local (VSIX-source) extensions referenced by `ids` from the pool into
-/// `vendor_dir` so the config is portable to machines without them installed.
-/// Returns the number of extensions vendored.
+/// Outcome of vendoring local (VSIX-source) extensions.
+#[derive(Debug, Default)]
+pub struct VendorReport {
+    /// Ids covered by a vendored `.vsix` (the portable, preferred source).
+    pub vsix_covered: Vec<String>,
+    /// Ids vendored only as an unpacked folder fallback (no `.vsix` available);
+    /// the user is nudged to supply a `.vsix` to slim the repo.
+    pub folder_fallback: Vec<String>,
+    /// Fallback folders pruned because a `.vsix` now supersedes them.
+    pub pruned_folders: usize,
+}
+
+/// Make local (VSIX-source) extensions referenced by `ids` portable. A package
+/// already backed by a vendored `.vsix` (matching id + version + targetPlatform)
+/// is left to that `.vsix` and any stale fallback folder is pruned; otherwise the
+/// installed folder is copied into `vendor/extensions/` as a fallback and reported
+/// so the user can supply a `.vsix`.
 pub fn vendor_local(
     editor: &Editor,
     catalog: &Catalog,
     ids: &BTreeSet<String>,
     vendor_dir: &Path,
     dry_run: bool,
-) -> Result<usize> {
-    let mut count = 0_usize;
+) -> Result<VendorReport> {
+    let vsix_dir = vsix_dir(vendor_dir);
+    let folder_dir = folder_dir(vendor_dir);
+    let vendored_vsix = vsix::discover(&vsix_dir)?;
+    let platform = vsix::current_platform();
+    let mut report = VendorReport::default();
+
     for id in ids {
         let Some(entry) = catalog.get(id) else {
             continue;
@@ -147,19 +188,51 @@ pub fn vendor_local(
         if !source.is_dir() {
             continue;
         }
-        count = count.saturating_add(1);
+
+        // Prefer a vendored .vsix that covers the installed version; if present,
+        // drop any unpacked fallback folder for this exact build.
+        let installed_version = entry_version(entry);
+        let covered = vendored_vsix
+            .get(id)
+            .is_some_and(|list| vsix::select(list, Some(&installed_version), &platform).is_some());
+        if covered {
+            report.vsix_covered.push(id.clone());
+            if !dry_run && prune_fallback_folder(&folder_dir, &rel)? {
+                report.pruned_folders = report.pruned_folders.saturating_add(1);
+            }
+            continue;
+        }
+
+        report.folder_fallback.push(id.clone());
         if dry_run {
             continue;
         }
-        let dest = vendor_dir.join(&rel);
+        let dest = folder_dir.join(&rel);
         if !dest.is_dir() {
             copy_dir(&source, &dest)?;
         }
-        let sidecar = vendor_dir.join(format!("{rel}.entry.json"));
+        let sidecar = folder_dir.join(format!("{rel}.entry.json"));
         let text = serde_json::to_string_pretty(entry).context("serializing vendored entry")?;
         safety::atomic_write(&sidecar, &text)?;
     }
-    Ok(count)
+    Ok(report)
+}
+
+/// Remove a fallback folder and its sidecar (a `.vsix` now supersedes it).
+/// Returns whether anything was removed.
+fn prune_fallback_folder(folder_dir: &Path, rel: &str) -> Result<bool> {
+    let mut removed = false;
+    let folder = folder_dir.join(rel);
+    if folder.is_dir() {
+        fs::remove_dir_all(&folder).with_context(|| format!("removing {}", folder.display()))?;
+        removed = true;
+    }
+    let sidecar = folder_dir.join(format!("{rel}.entry.json"));
+    if sidecar.is_file() {
+        fs::remove_file(&sidecar).with_context(|| format!("removing {}", sidecar.display()))?;
+        removed = true;
+    }
+    Ok(removed)
 }
 
 /// Remove `id` from a profile's membership list (never deletes shared files).
@@ -217,6 +290,38 @@ fn add_from_catalog(
     entries.retain(|e| entry_id(e).as_deref() != Some(id));
     entries.push(entry);
     write_entries(&path, &entries, backup_dir)?;
+    Ok(true)
+}
+
+/// Install `id` from a vendored `.vsix` (the preferred portable source). Selects
+/// the best candidate for the pin and current platform, installs it via the
+/// editor CLI (which unpacks it into the shared pool), and freezes it when pinned.
+/// Returns `false` when no suitable vendored `.vsix` exists.
+fn add_from_vsix(
+    editor: &Editor,
+    profile: &Profile,
+    id: &str,
+    pin: Option<&str>,
+    vsix_dir: &Path,
+    backup_dir: &Path,
+) -> Result<bool> {
+    let candidates = vsix::discover(vsix_dir)?;
+    let Some(list) = candidates.get(id) else {
+        return Ok(false);
+    };
+    let Some(chosen) = vsix::select(list, pin, &vsix::current_platform()) else {
+        return Ok(false);
+    };
+    let path = chosen.path.to_string_lossy();
+    run_cli(
+        editor,
+        profile.cli_profile(),
+        &["--install-extension", &path, "--force"],
+    )
+    .with_context(|| format!("installing {id} from {}", chosen.path.display()))?;
+    if pin.is_some() {
+        set_membership_pinned(editor, profile, id, backup_dir)?;
+    }
     Ok(true)
 }
 

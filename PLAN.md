@@ -700,10 +700,16 @@ concepts — **exact-version install** (`id@1.2.3`) and **freeze / no-auto-updat
   churns the 3-way merge and recording versions would only force a format migration for no
   behavioral gain; version drift is handled at install (push/sync) and capture (pull).
   Tests added for pinned push (freezes at version) and pull pin round-trip.
-- [ ] Stage 2 — vsix vendoring: `zip` dep, `vendor/{vsix,extensions}` split, manifest-driven
-  discovery (id+version+targetPlatform), restore tiering (pool → `extension_sources` →
-  `vendor/vsix` → folder fallback → CLI), folder pruning on exact match, engine pre-flight
-  warning, two-bucket end-of-run report.
+- [x] Stage 2 — vsix vendoring: `zip` dep (deflate-only) + `src/vsix.rs` (manifest
+  read of id+version+targetPlatform+engine, discovery keyed by id, platform/version-aware
+  `select`); `vendor/` root split into `vsix/` (preferred) + `extensions/` (fallback);
+  restore tier `add_from_vsix` (pool → `vendor/vsix` → folder fallback → CLI; installs via
+  editor CLI and freezes when pinned); `vendor_local` prunes a fallback folder when a `.vsix`
+  of the same id+version+targetPlatform supersedes it and reports a two-bucket nudge
+  (folder-fallback → "add a .vsix"). **Deferred:** the `engines.vscode` pre-flight warning —
+  it needs the editor's API version, which `Product` doesn't currently discover; vsix install
+  failures are already reported and skipped, so this is a follow-up, not a blocker.
+  `extension_sources` (the live-external tier) lands in Stage 3.
 - [ ] Stage 3 — `[extension_sources]` config + schema + `docs/config.md`, drift-guard test.
 
 ---

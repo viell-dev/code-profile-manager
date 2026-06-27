@@ -17,6 +17,7 @@ pub struct AppPaths {
     pub editors_dir: PathBuf,
     pub snapshots_dir: PathBuf,
     pub backups_dir: PathBuf,
+    /// The `vendor/` root; holds `vsix/` (preferred) and `extensions/` (fallback).
     pub vendor_dir: PathBuf,
 }
 
@@ -31,7 +32,7 @@ impl AppPaths {
             editors_dir: root.join("editors"),
             snapshots_dir: root.join("snapshots"),
             backups_dir: root.join("backups"),
-            vendor_dir: root.join("vendor").join("extensions"),
+            vendor_dir: root.join("vendor"),
         })
     }
 

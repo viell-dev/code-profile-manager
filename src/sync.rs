@@ -1001,19 +1001,47 @@ fn install_ext(
     )?;
     let how = match method {
         extension::AddMethod::Pool => "from pool",
-        extension::AddMethod::Vendor => "from vendored copy",
+        extension::AddMethod::Vsix => "from vendored .vsix",
+        extension::AddMethod::Vendor => "from vendored folder",
         extension::AddMethod::Cli => "via CLI",
     };
     ui::bullet(format!("installed {id} into {} ({how})", profile.name));
     Ok(())
 }
 
-/// Vendor local (VSIX-source) extensions referenced by `ids` into the repo.
+/// Vendor local (VSIX-source) extensions referenced by `ids` into the repo, then
+/// nudge (never force) the user toward portable `.vsix` sources for any that fell
+/// back to an unpacked folder.
 fn vendor_step(ctx: &Ctx<'_>, catalog: &Catalog, ids: &BTreeSet<String>) {
-    match extension::vendor_local(ctx.editor, catalog, ids, &ctx.vendor_dir, ctx.dry_run) {
-        Ok(0) => {}
-        Ok(n) => ui::bullet(format!("vendored {n} local extension(s)")),
-        Err(err) => ui::warn(format!("vendoring local extensions failed: {err:#}")),
+    let report =
+        match extension::vendor_local(ctx.editor, catalog, ids, &ctx.vendor_dir, ctx.dry_run) {
+            Ok(report) => report,
+            Err(err) => {
+                ui::warn(format!("vendoring local extensions failed: {err:#}"));
+                return;
+            }
+        };
+    if !report.vsix_covered.is_empty() {
+        ui::bullet(format!(
+            "{} local extension(s) backed by a vendored .vsix",
+            report.vsix_covered.len()
+        ));
+    }
+    if report.pruned_folders > 0 {
+        ui::bullet(format!(
+            "pruned {} fallback folder(s) superseded by a .vsix",
+            report.pruned_folders
+        ));
+    }
+    if !report.folder_fallback.is_empty() {
+        ui::bullet(format!(
+            "vendored {} local extension(s) as an unpacked folder",
+            report.folder_fallback.len()
+        ));
+        ui::detail(format!(
+            "add a .vsix to vendor/vsix/ to slim the repo for: {}",
+            report.folder_fallback.join(", ")
+        ));
     }
 }
 
@@ -1135,7 +1163,7 @@ mod tests {
             };
             Ok(Self {
                 backup_dir: temp.path().join("backups"),
-                vendor_dir: temp.path().join("vendor").join("extensions"),
+                vendor_dir: temp.path().join("vendor"),
                 _temp: temp,
                 editor,
             })

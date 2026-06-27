@@ -120,7 +120,7 @@ impl StoragePaths {
                 .join("snapshots")
                 .join(format!("{}.snapshot.json", safe_id(editor.id()))),
             backup_dir: state_dir.join("backups").join(safety::timestamp()),
-            vendor_dir: state_dir.join("vendor").join("extensions"),
+            vendor_dir: state_dir.join("vendor"),
         }
     }
 }

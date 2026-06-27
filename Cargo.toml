@@ -58,6 +58,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sysinfo = "0.39.5"
 toml = "1.1.2"
+# Read `.vsix` packages (zip archives). Deflate-only keeps the dependency tree small.
+zip = { version = "2.2.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"
