@@ -36,6 +36,13 @@ pub struct Config {
     pub default: DefaultProfile,
     /// Named (non-default) profiles.
     pub profiles: BTreeMap<String, ProfileConfig>,
+    /// Non-marketplace extension sources: normalized id -> path to a `.vsix`. A
+    /// custom path here is a **live external reference** — read each run, never
+    /// copied into `vendor/` — for `.vsix` files kept outside the repo (e.g. a
+    /// corporate share). Files dropped in `vendor/vsix/` are auto-discovered and
+    /// need no entry here.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extension_sources: BTreeMap<String, PathBuf>,
 }
 
 /// Top-level behavior options.
@@ -178,6 +185,15 @@ impl Config {
             }
         }
         Ok(config)
+    }
+
+    /// Resolve a live external `.vsix` source for the normalized `id`, if one is
+    /// configured under `[extension_sources]` (keys are matched case-insensitively).
+    pub fn extension_source(&self, id: &str) -> Option<&Path> {
+        self.extension_sources
+            .iter()
+            .find(|(key, _)| normalize_id(key) == id)
+            .map(|(_, path)| path.as_path())
     }
 
     /// Names of profiles marked for deletion (`delete = true` tombstones).
@@ -599,6 +615,26 @@ mod tests {
     }
 
     #[test]
+    fn extension_sources_resolve_case_insensitively_and_roundtrip() {
+        let mut config = Config::default();
+        config.extension_sources.insert(
+            "Hansu.Git-Graph-2".to_owned(),
+            PathBuf::from("vendor/vsix/hansu.git-graph-2-1.31.7.vsix"),
+        );
+        assert_eq!(
+            config.extension_source("hansu.git-graph-2"),
+            Some(Path::new("vendor/vsix/hansu.git-graph-2-1.31.7.vsix"))
+        );
+        assert_eq!(config.extension_source("other.ext"), None);
+
+        let parsed: Config = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            parsed.extension_source("hansu.git-graph-2"),
+            Some(Path::new("vendor/vsix/hansu.git-graph-2-1.31.7.vsix"))
+        );
+    }
+
+    #[test]
     fn resolve_profile_pin_overrides_global_floating() {
         let mut config = Config::default();
         config.global.extensions.push("pub.x".to_owned());
@@ -650,11 +686,18 @@ mod tests {
             ProfileConfig {
                 icon: Some("package".to_owned()),
                 groups: vec!["web".to_owned()],
-                extensions: vec!["rust-lang.rust-analyzer".to_owned()],
+                extensions: vec![
+                    "rust-lang.rust-analyzer".to_owned(),
+                    "hansu.git-graph-2@1.31.7".to_owned(),
+                ],
                 exclude_extensions: vec!["editorconfig.editorconfig".to_owned()],
                 use_default: BTreeMap::from([("keybindings".to_owned(), true)]),
                 ..ProfileConfig::default()
             },
+        );
+        config.extension_sources.insert(
+            "corp.internal-tool".to_owned(),
+            PathBuf::from("/mnt/corp/extensions/internal-tool.vsix"),
         );
         config
     }
@@ -709,6 +752,15 @@ mod tests {
                 &json!({ "profiles": { "Legacy": { "delete": true, "extensions": ["pub.x"] } } })
             ),
             "delete = true combined with content must fail validation"
+        );
+        assert!(
+            !validator
+                .is_valid(&json!({ "extension_sources": { "pub.x": "/path/not-a-vsix.zip" } })),
+            "an extension source path must end in .vsix"
+        );
+        assert!(
+            !validator.is_valid(&json!({ "extension_sources": { "pub.x@1.0.0": "x.vsix" } })),
+            "an extension source key must be a bare id (no @version)"
         );
     }
 

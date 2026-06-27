@@ -710,7 +710,14 @@ concepts — **exact-version install** (`id@1.2.3`) and **freeze / no-auto-updat
   it needs the editor's API version, which `Product` doesn't currently discover; vsix install
   failures are already reported and skipped, so this is a follow-up, not a blocker.
   `extension_sources` (the live-external tier) lands in Stage 3.
-- [ ] Stage 3 — `[extension_sources]` config + schema + `docs/config.md`, drift-guard test.
+- [x] Stage 3 — `[extension_sources]` top-level map (id -> `.vsix` path) on `Config` with a
+  case-insensitive `extension_source` lookup, wired as the live-external restore tier
+  (installed in place via `add_from_external`, never copied; version-checked against a pin).
+  `schema/config.schema.json` gains the `extensionSources` def (bare-id keys, `.vsix`-suffix
+  values) and the enforced-pin description; `docs/config.md` documents version pins, the
+  `vendor/{vsix,extensions}` split, restore order, and `[extension_sources]`. Drift-guard
+  test extended (representative config carries a pin + an extension source; schema rejects
+  non-`.vsix` values and `@version` keys). All checks green: fmt, clippy, 56 tests.
 
 ---
 

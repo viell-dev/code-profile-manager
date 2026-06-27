@@ -35,6 +35,10 @@
         "$comment": "[profiles.Default] is rejected on load; use [default] instead."
       },
       "additionalProperties": { "$ref": "#/$defs/profileConfig" }
+    },
+    "extension_sources": {
+      "$ref": "#/$defs/extensionSources",
+      "description": "Non-marketplace extension sources: extension id -> path to a .vsix file. A live external reference, read each run and never copied into vendor/ (e.g. a .vsix kept on a corporate share). Files dropped in vendor/vsix/ are auto-discovered and need no entry here."
     }
   },
   "$defs": {
@@ -50,8 +54,21 @@
     },
     "extensionId": {
       "type": "string",
-      "description": "Extension identifier 'publisher.name', optionally pinned as 'publisher.name@version'. Pins are parsed but not enforced for membership.",
+      "description": "Extension identifier 'publisher.name', optionally pinned as 'publisher.name@version'. A pin installs and holds that exact version (frozen via the editor's metadata.pinned); a bare id floats to the latest compatible build.",
       "pattern": "^[a-z0-9][a-z0-9-]*\\.[a-z0-9][a-z0-9-]*(@.+)?$"
+    },
+    "extensionSources": {
+      "type": "object",
+      "description": "Map of extension id to a path to a .vsix file (a live external source).",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9-]*\\.[a-z0-9][a-z0-9-]*$",
+        "$comment": "Keys are bare extension ids (no @version); the .vsix itself carries the version."
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "\\.vsix$",
+        "description": "Path to a .vsix file."
+      }
     },
     "extensionList": {
       "type": "array",
