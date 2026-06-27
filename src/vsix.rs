@@ -17,7 +17,11 @@ use serde::Deserialize;
 /// Platform-agnostic builds use this `targetPlatform`.
 pub const UNIVERSAL: &str = "universal";
 
-/// Identity + compatibility metadata read from a `.vsix` package.
+/// Identity metadata read from a `.vsix` package.
+///
+/// We deliberately do **not** read or evaluate `engines.vscode`: the editor's own
+/// installer validates API compatibility and install failures are reported and
+/// skipped (see PLAN.md §4.1), so there is nothing for us to gate on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VsixInfo {
     /// Normalized `publisher.name`.
@@ -25,8 +29,6 @@ pub struct VsixInfo {
     pub version: String,
     /// `targetPlatform` (e.g. `linux-x64`), or [`UNIVERSAL`] when unspecified.
     pub target_platform: String,
-    /// `engines.vscode` (e.g. `^1.85.0`), when declared.
-    pub engine: Option<String>,
 }
 
 /// A discovered vendored `.vsix` and its location.
@@ -41,12 +43,6 @@ struct PackageJson {
     publisher: String,
     name: String,
     version: String,
-    engines: Option<Engines>,
-}
-
-#[derive(Deserialize)]
-struct Engines {
-    vscode: Option<String>,
 }
 
 /// Read identity + compatibility metadata from a `.vsix` file.
@@ -71,7 +67,6 @@ pub fn read_info(path: &Path) -> Result<VsixInfo> {
         id: format!("{}.{}", pkg.publisher, pkg.name).to_lowercase(),
         version: pkg.version,
         target_platform,
-        engine: pkg.engines.and_then(|e| e.vscode),
     })
 }
 
@@ -186,9 +181,7 @@ mod tests {
         let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
         let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
         zip.start_file("extension/package.json", opts).unwrap();
-        let pkg = format!(
-            r#"{{"publisher":"{publisher}","name":"{name}","version":"{version}","engines":{{"vscode":"^1.85.0"}}}}"#
-        );
+        let pkg = format!(r#"{{"publisher":"{publisher}","name":"{name}","version":"{version}"}}"#);
         zip.write_all(pkg.as_bytes()).unwrap();
         if let Some(platform) = platform {
             zip.start_file("extension.vsixmanifest", opts).unwrap();
@@ -214,7 +207,6 @@ mod tests {
         assert_eq!(info.id, "hansu.git-graph-2");
         assert_eq!(info.version, "1.31.7");
         assert_eq!(info.target_platform, "linux-x64");
-        assert_eq!(info.engine.as_deref(), Some("^1.85.0"));
     }
 
     #[test]
@@ -245,7 +237,6 @@ mod tests {
                 id: "pub.name".to_owned(),
                 version: version.to_owned(),
                 target_platform: platform.to_owned(),
-                engine: None,
             },
             path: PathBuf::from(format!("pub.name-{version}-{platform}.vsix")),
         }

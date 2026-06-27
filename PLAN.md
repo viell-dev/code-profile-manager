@@ -663,11 +663,17 @@ questions — flagged below.
   — so a fork-gated extension in the pool is inert for the other fork unless its config
   lists the id. Failed installs are already reported and skipped (§4), covering genuine
   engine/product rejections.
-- **Add a manifest pre-flight:** since we already crack `package.json` for
-  id+version+targetPlatform, also read `engines.vscode`; if the target editor's version
-  doesn't satisfy it, warn ("won't run on this editor") instead of surfacing a raw CLI
-  failure. The vendor cache key **must** include `targetPlatform` (native-binary extensions
-  ship `linux-x64` etc. builds) or two platforms/forks would collide on one entry.
+- **No `engines.vscode` evaluation (DECIDED — out of scope).** We do not read or check an
+  extension's required API version. Determining compatibility would need the editor's API
+  version (present in `product.json` `version` but not in our `Product`, and fork-dependent in
+  format — e.g. this machine's VSCodium reports `1.121.03429`, not clean upstream semver) plus
+  semver-range matching, all for a warning. Instead we rely on graceful install handling:
+  failed CLI/`.vsix` installs are reported and skipped, never aborting the run
+  (`apply_extensions`). The copy-entry tiers (pool catalog, folder fallback) bypass the
+  editor's check and so won't catch an incompatible build, but that edge case (a vendored
+  artifact carried to an editor with an older API) isn't worth the fork-specific machinery.
+  The vendor cache key still includes `targetPlatform` (native-binary extensions ship
+  `linux-x64` etc. builds) so two platforms don't collide on one entry.
 
 **Version pinning / freeze (DECIDED — ships in the same branch).** Today pins/freeze are
 *not* exposed: `normalize_id` (config.rs) drops `@version` and lowercases, the snapshot
@@ -706,10 +712,10 @@ concepts — **exact-version install** (`id@1.2.3`) and **freeze / no-auto-updat
   restore tier `add_from_vsix` (pool → `vendor/vsix` → folder fallback → CLI; installs via
   editor CLI and freezes when pinned); `vendor_local` prunes a fallback folder when a `.vsix`
   of the same id+version+targetPlatform supersedes it and reports a two-bucket nudge
-  (folder-fallback → "add a .vsix"). **Deferred:** the `engines.vscode` pre-flight warning —
-  it needs the editor's API version, which `Product` doesn't currently discover; vsix install
-  failures are already reported and skipped, so this is a follow-up, not a blocker.
-  `extension_sources` (the live-external tier) lands in Stage 3.
+  (folder-fallback → "add a .vsix"). **Out of scope (decided):** no `engines.vscode`
+  evaluation — we rely on graceful install-error handling instead of computing API-version
+  compatibility (see the fork-compat note above). `extension_sources` (the live-external
+  tier) lands in Stage 3.
 - [x] Stage 3 — `[extension_sources]` top-level map (id -> `.vsix` path) on `Config` with a
   case-insensitive `extension_source` lookup, wired as the live-external restore tier
   (installed in place via `add_from_external`, never copied; version-checked against a pin).
