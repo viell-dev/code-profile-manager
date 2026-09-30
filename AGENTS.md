@@ -74,7 +74,7 @@ Each links to the authoritative explanation in PLAN.md.
 - Use the **`git-conventions`** skill for commits; **`agent-attribution`** for any
   user-visible content/commits.
 - Project paths contain spaces — quote them; never `cd` to CWD; never backslash-escape.
-- AI files (`AGENTS.md`, `CLAUDE.md`) are globally git-ignored; force-add to commit them.
+- `AGENTS.md` is globally git-ignored; force-add it to commit it.
 - **Branch workflow.** Make all changes on a new branch off `main` (never commit directly
   to `main`). Commit freely as you go — multiple small commits per branch is fine. When a
   feature is done: push the branch and open a PR. Once CI on the PR is green **and the user
